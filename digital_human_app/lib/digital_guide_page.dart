@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 class DigitalGuidePage extends StatefulWidget {
   const DigitalGuidePage({super.key});
@@ -30,8 +31,11 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
   late FlutterTts _flutterTts;
   bool _ttsReady = false;
 
+  // WebView控制器
+  InAppWebViewController? _webController;
+
   // API地址
-  final String _apiUrl = "http://10.3.163.254:8000/chat";
+  final String _apiUrl = "http://127.0.0.1:8000/chat";
 
   @override
   void initState() {
@@ -73,6 +77,13 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
       _flutterTts.setStartHandler(() {
         setState(() => _isSpeaking = true);
         _animController.repeat();
+        
+        // 告诉数字人开始说话
+        _webController?.loadUrl(
+  urlRequest: URLRequest(
+    url: WebUri('http://127.0.0.1:8000/static/avatar.html?action=startTalking'),
+  ),
+);
       });
 
       _flutterTts.setCompletionHandler(() {
@@ -81,6 +92,13 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
           _mouthOpen = 0.0;
         });
         _animController.stop();
+        
+        // 告诉数字人停止说话
+        _webController?.loadUrl(
+  urlRequest: URLRequest(
+    url: WebUri('http://127.0.0.1:8000/static/avatar.html?action=stopTalking'),
+  ),
+);
       });
 
       setState(() => _ttsReady = true);
@@ -175,6 +193,15 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
           _isLoading = false;
         });
 
+        // 随机做一个动作
+        final gestures = ['wave', 'nod', 'shake'];
+        final randomGesture = gestures[Random().nextInt(3)];
+        _webController?.loadUrl(
+  urlRequest: URLRequest(
+    url: WebUri('http://127.0.0.1:8000/static/avatar.html?action=$randomGesture'),
+  ),
+);
+
         // 语音播报回答
         _speak(answer);
       }
@@ -214,11 +241,19 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
       ),
       body: Column(
         children: [
-          // 数字人显示区域
-          _buildDigitalPerson(),
+          // 数字人显示区域（高度固定）
+          SizedBox(
+            height: 280,
+            child: _buildDigitalPerson(),
+          ),
 
-          // 聊天记录
-          Expanded(child: _buildChatList()),
+          // 聊天记录（用 Expanded 撑满剩余空间，紧挨着数字人）
+          Expanded(
+            child: Container(
+              color: const Color(0xFFF5F7FA),
+              child: _buildChatList(),
+            ),
+          ),
 
           // 输入区域
           _buildInputArea(),
@@ -229,12 +264,16 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
 
   Widget _buildDigitalPerson() {
     return Container(
-      height: 240,
+      height: 280,
       decoration: const BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [Color(0xFF667EEA), Color(0xFF764BA2)],
+        ),
+        borderRadius: BorderRadius.only(
+          bottomLeft: Radius.zero,
+          bottomRight: Radius.zero,
         ),
       ),
       child: Stack(
@@ -257,61 +296,80 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
             ),
           ),
 
-          // 数字人
+          // ★★★ 用InAppWebView加载后端的HTML ★★★
           Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CustomPaint(
-                  size: const Size(160, 180),
-                  painter: GuidePainter(mouthOpen: _mouthOpen),
+            child: SizedBox(
+              width: double.infinity,
+              height: 260,
+              child: InAppWebView(
+                initialSettings: InAppWebViewSettings(
+                  javaScriptEnabled: true,
                 ),
-                // 语音状态指示
-                if (_isListening)
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 4,
+                initialUrlRequest: URLRequest(
+                  url: WebUri('http://127.0.0.1:8000/static/avatar.html'),
+                ),
+                onWebViewCreated: (controller) {
+                  _webController = controller;
+                },
+              ),
+            ),
+          ),
+
+          // 语音状态指示
+          Positioned(
+            bottom: 10,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_isListening)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.mic, color: Colors.white, size: 16),
+                          SizedBox(width: 4),
+                          Text(
+                            "正在聆听...",
+                            style: TextStyle(color: Colors.white, fontSize: 12),
+                          ),
+                        ],
+                      ),
                     ),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.2),
-                      borderRadius: BorderRadius.circular(20),
+                  if (_isSpeaking)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.volume_up, color: Colors.white, size: 16),
+                          SizedBox(width: 4),
+                          Text(
+                            "正在说话...",
+                            style: TextStyle(color: Colors.white, fontSize: 12),
+                          ),
+                        ],
+                      ),
                     ),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.mic, color: Colors.white, size: 16),
-                        SizedBox(width: 4),
-                        Text(
-                          "正在聆听...",
-                          style: TextStyle(color: Colors.white, fontSize: 12),
-                        ),
-                      ],
-                    ),
-                  ),
-                if (_isSpeaking)
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 4,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.2),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.volume_up, color: Colors.white, size: 16),
-                        SizedBox(width: 4),
-                        Text(
-                          "正在说话...",
-                          style: TextStyle(color: Colors.white, fontSize: 12),
-                        ),
-                      ],
-                    ),
-                  ),
-              ],
+                ],
+              ),
             ),
           ),
         ],
@@ -469,103 +527,4 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
       ),
     );
   }
-}
-
-// 数字人绘制器
-class GuidePainter extends CustomPainter {
-  final double mouthOpen;
-
-  GuidePainter({this.mouthOpen = 0.0});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final cx = size.width / 2;
-    final cy = size.height / 2;
-
-    // 头发
-    final hairPaint = Paint()
-      ..color = Colors.brown[700]!
-      ..style = PaintingStyle.fill;
-    canvas.drawPath(
-      Path()
-        ..moveTo(cx - 80, cy - 60)
-        ..quadraticBezierTo(cx - 100, cy - 110, cx - 40, cy - 120)
-        ..quadraticBezierTo(cx, cy - 130, cx + 40, cy - 120)
-        ..quadraticBezierTo(cx + 100, cy - 105, cx + 80, cy - 55)
-        ..close(),
-      hairPaint,
-    );
-
-    // 脸
-    canvas.drawCircle(
-      Offset(cx, cy - 10),
-      70,
-      Paint()
-        ..color = const Color(0xFFFFE0BD)
-        ..style = PaintingStyle.fill,
-    );
-
-    // 眼睛
-    canvas.drawCircle(
-      Offset(cx - 22, cy - 25),
-      10,
-      Paint()..color = Colors.white,
-    );
-    canvas.drawCircle(
-      Offset(cx + 22, cy - 25),
-      10,
-      Paint()..color = Colors.white,
-    );
-    canvas.drawCircle(
-      Offset(cx - 22, cy - 25),
-      6,
-      Paint()..color = Colors.black87,
-    );
-    canvas.drawCircle(
-      Offset(cx + 22, cy - 25),
-      6,
-      Paint()..color = Colors.black87,
-    );
-
-    // 嘴巴
-    final mouthPaint = Paint()
-      ..color = const Color(0xFFE57373)
-      ..style = PaintingStyle.fill;
-
-    if (mouthOpen > 0.1) {
-      canvas.drawOval(
-        Rect.fromCenter(
-          center: Offset(cx, cy + 15),
-          width: 22,
-          height: 8 + mouthOpen * 18,
-        ),
-        mouthPaint,
-      );
-    } else {
-      canvas.drawPath(
-        Path()
-          ..moveTo(cx - 15, cy + 15)
-          ..quadraticBezierTo(cx, cy + 5, cx + 15, cy + 15)
-          ..close(),
-        mouthPaint,
-      );
-    }
-
-    // 身体
-    final bodyPaint = Paint()
-      ..color = Colors.blue[400]!
-      ..style = PaintingStyle.fill;
-    canvas.drawRRect(
-      RRect.fromRectAndCorners(
-        Rect.fromLTWH(cx - 35, cy + 60, 70, 80),
-        topLeft: const Radius.circular(10),
-        topRight: const Radius.circular(10),
-      ),
-      bodyPaint,
-    );
-  }
-
-  @override
-  bool shouldRepaint(GuidePainter oldDelegate) =>
-      oldDelegate.mouthOpen != mouthOpen;
 }

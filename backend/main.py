@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
@@ -50,6 +51,9 @@ app = FastAPI(
     description="景区智能导览系统后端接口",
     version="1.0.0"
 )
+
+
+app.mount("/static", StaticFiles(directory="D:/AI_Guide_Project/backend/static"), name="static")
 
 # 允许跨域（重要：如果前端是网页）
 app.add_middleware(
