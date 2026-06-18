@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -54,6 +55,57 @@ app = FastAPI(
 
 
 app.mount("/static", StaticFiles(directory="D:/AI_Guide_Project/backend/static"), name="static")
+
+ADMIN_DASHBOARD_HTML = """
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>景区管理后台</title>
+  <style>
+    :root { color-scheme: light; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f7fa; color: #1f2937; }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 24px; }
+    .hero { background: linear-gradient(135deg, #667eea, #764ba2); color: white; border-radius: 20px; padding: 24px; box-shadow: 0 12px 30px rgba(102,126,234,.25); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap: 16px; margin-top: 18px; }
+    .card { background: white; border-radius: 18px; padding: 18px; box-shadow: 0 6px 18px rgba(15,23,42,.08); }
+    .label { font-size: 13px; color: #6b7280; }
+    .value { font-size: 28px; font-weight: 700; margin-top: 8px; }
+    .section { margin-top: 22px; background: white; border-radius: 18px; padding: 18px; box-shadow: 0 6px 18px rgba(15,23,42,.08); }
+    .pill { display: inline-block; padding: 6px 10px; border-radius: 999px; background: #eef2ff; color: #4338ca; font-size: 12px; margin-right: 8px; }
+    ul { padding-left: 18px; }
+    li { margin: 8px 0; }
+    a { color: #2563eb; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero">
+      <div class="pill">FastAPI 管理后台</div>
+      <div class="pill">游客交互数据</div>
+      <h1 style="margin: 14px 0 8px;">景区导览管理后台</h1>
+      <p style="margin: 0; opacity: .95;">这里是由 FastAPI 直接提供的可访问后台首页，用于在 Flutter Web 中嵌入展示。</p>
+    </div>
+    <div class="grid">
+      <div class="card"><div class="label">后台状态</div><div class="value">正常</div></div>
+      <div class="card"><div class="label">知识库</div><div class="value">可管理</div></div>
+      <div class="card"><div class="label">游客反馈</div><div class="value">可查看</div></div>
+      <div class="card"><div class="label">感受度报告</div><div class="value">可生成</div></div>
+    </div>
+    <div class="section">
+      <h2>功能入口</h2>
+      <ul>
+        <li><a href="/docs" target="_blank" rel="noreferrer">FastAPI API 文档</a></li>
+        <li><a href="/admin/stats/dashboard" target="_blank" rel="noreferrer">数据大屏 JSON</a></li>
+        <li><a href="/admin/report/sentiment?days=7" target="_blank" rel="noreferrer">感受度报告 JSON</a></li>
+        <li><a href="/admin/knowledge/list" target="_blank" rel="noreferrer">知识库文件列表 JSON</a></li>
+      </ul>
+    </div>
+  </div>
+</body>
+</html>
+"""
 
 # 允许跨域（重要：如果前端是网页）
 app.add_middleware(
@@ -378,17 +430,23 @@ class FeedbackRequest(BaseModel):
 os.makedirs("logs", exist_ok=True)
 
 # 首页路由
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 async def root():
+    return ADMIN_DASHBOARD_HTML
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_page():
+    return ADMIN_DASHBOARD_HTML
+
+@app.get("/admin/dashboard", response_class=HTMLResponse)
+async def admin_dashboard_page():
+    return ADMIN_DASHBOARD_HTML
+
+@app.get("/admin/health")
+async def admin_health():
     return {
-        "message": "🏔️ AI数字人导游API服务",
-        "status": "running",
-        "endpoints": {
-            "health_check": "/health",
-            "chat": "/chat (POST)",
-            "api_docs": "/docs 或 /redoc",
-            "stats": "/stats"
-        },
+        "status": "ok",
+        "page": "admin-dashboard",
         "timestamp": datetime.now().isoformat()
     }
 

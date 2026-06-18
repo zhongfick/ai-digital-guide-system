@@ -5,12 +5,47 @@
   <style>body{margin:0;overflow:hidden}canvas{display:block}</style>
 </head>
 <body>
+  <!-- 非 module 脚本：页面一加载就可用，解决 App WebView 指令过早发送的问题 -->
+  <script>
+    window.__avatarCommandQueue__ = [];
+    window.sendAvatarCommand = function(action) {
+      if (window.avatarControl && window.avatarControl.sendCommand) {
+        window.avatarControl.sendCommand(action);
+        return true;
+      }
+      window.__avatarCommandQueue__.push(action);
+      console.log('指令已排队:', action);
+      return false;
+    };
+    window.__flushAvatarCommands__ = function() {
+      while (window.__avatarCommandQueue__.length > 0) {
+        var cmd = window.__avatarCommandQueue__.shift();
+        window.avatarControl.sendCommand(cmd);
+        console.log('执行排队指令:', cmd);
+      }
+    };
+    window.__notifyFlutterReady__ = function() {
+      if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+        window.flutter_inappwebview.callHandler('avatarReady');
+      }
+      window.parent.postMessage(JSON.stringify({ type: 'avatarReady' }), '*');
+    };
+    window.addEventListener('message', function(event) {
+      try {
+        var data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+        if (data && data.type === 'avatarCommand' && data.action) {
+          window.sendAvatarCommand(data.action);
+        }
+      } catch (e) {}
+    });
+  </script>
+
  <script type="importmap">
 {
   "imports": {
-    "three": "https://unpkg.com/three@0.157.0/build/three.module.js",
-    "three/addons/": "https://unpkg.com/three@0.157.0/examples/jsm/",
-    "@pixiv/three-vrm": "https://unpkg.com/@pixiv/three-vrm@3.5.3/lib/three-vrm.module.min.js"
+    "three": "/static/vendor/three.module.js",
+    "three/addons/": "/static/vendor/three/addons/",
+    "@pixiv/three-vrm": "/static/vendor/three-vrm.module.min.js"
   }
 }
 </script>
@@ -19,22 +54,6 @@
     import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
     import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
-
-    // ★★★ 新增：读取 URL 参数并执行对应动作 ★★★
-    (function() {
-      var params = new URLSearchParams(window.location.search);
-      var action = params.get('action');
-      if (action === 'startTalking') {
-        window.__pendingAction__ = 'startTalking';
-        console.log('URL参数: 等待加载完成后开始说话');
-      } else if (action === 'stopTalking') {
-        window.__pendingAction__ = 'stopTalking';
-        console.log('URL参数: 等待加载完成后停止说话');
-      } else if (action === 'wave' || action === 'nod' || action === 'shake') {
-        window.__pendingAction__ = action;
-        console.log('URL参数: 等待加载完成后做动作', action);
-      }
-    })();
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
@@ -57,54 +76,140 @@
     loader.register(parser => new VRMLoaderPlugin(parser));
 
     let vrm = null;
-    window.vrm = vrm;
     let time = 0;
     let isTalking = false;
     let talkTime = 0;
     let gestureType = 'none';
     let gestureTime = 0;
-    let pendingAction = window.__pendingAction__ || null;  // ★★★ 保存待执行的动作 ★★★
+    let nextRandomGestureAt = 0;
+
+    const GESTURE_DURATIONS = { wave: 2.0, nod: 1.2, shake: 1.2, point: 1.5 };
+    const RANDOM_GESTURES = ['wave', 'nod', 'shake', 'point'];
+
+    function scheduleNextRandomGesture() {
+      nextRandomGestureAt = talkTime + 1.5 + Math.random() * 2.5;
+    }
+
+    function resetPose() {
+      if (!vrm || !vrm.humanoid) return;
+      const leftArm = vrm.humanoid.getNormalizedBoneNode('leftUpperArm');
+      const rightArm = vrm.humanoid.getNormalizedBoneNode('rightUpperArm');
+      const leftFore = vrm.humanoid.getNormalizedBoneNode('leftLowerArm');
+      const rightFore = vrm.humanoid.getNormalizedBoneNode('rightLowerArm');
+      const head = vrm.humanoid.getNormalizedBoneNode('head');
+      if (leftArm) leftArm.rotation.set(0, 0, 0.5);
+      if (rightArm) rightArm.rotation.set(0, 0, -0.5);
+      if (leftFore) leftFore.rotation.set(0, 0, 0.3);
+      if (rightFore) rightFore.rotation.set(0, 0, -0.3);
+      if (head) head.rotation.set(0, 0, 0);
+    }
+
+    function startGesture(action) {
+      gestureType = action;
+      gestureTime = 0;
+      console.log('开始动作:', action);
+    }
+
+    function pickRandomGesture() {
+      return RANDOM_GESTURES[Math.floor(Math.random() * RANDOM_GESTURES.length)];
+    }
+
+    function handleCommand(action) {
+      if (!vrm) {
+        window.__pendingAction__ = action;
+        console.log('VRM未加载，暂存指令:', action);
+        return;
+      }
+      if (action === 'startTalking') {
+        isTalking = true;
+        talkTime = 0;
+        startGesture(pickRandomGesture());
+        scheduleNextRandomGesture();
+        console.log('开始说话 + 立即做动作');
+      } else if (action === 'stopTalking') {
+        isTalking = false;
+        talkTime = 0;
+        gestureType = 'none';
+        resetPose();
+        console.log('停止说话');
+      } else if (GESTURE_DURATIONS[action]) {
+        startGesture(action);
+      }
+    }
+
+    function applyGesturePose() {
+      if (!vrm || !vrm.humanoid || gestureType === 'none') return;
+
+      const gestureDuration = GESTURE_DURATIONS[gestureType] || 0;
+      if (gestureTime >= gestureDuration) {
+        resetPose();
+        gestureType = 'none';
+        return;
+      }
+
+      if (gestureType === 'wave') {
+        const rightArm = vrm.humanoid.getNormalizedBoneNode('rightUpperArm');
+        const rightFore = vrm.humanoid.getNormalizedBoneNode('rightLowerArm');
+        if (rightArm) {
+          rightArm.rotation.set(
+            -0.2,
+            Math.sin(gestureTime * 8) * 0.5,
+            -1.2 + Math.sin(gestureTime * 8) * 0.4
+          );
+        }
+        if (rightFore) {
+          rightFore.rotation.set(0, 0, -0.8 + Math.sin(gestureTime * 8) * 0.3);
+        }
+      } else if (gestureType === 'nod') {
+        const head = vrm.humanoid.getNormalizedBoneNode('head');
+        if (head) {
+          head.rotation.x = Math.sin(gestureTime * 6) * 0.35;
+        }
+      } else if (gestureType === 'shake') {
+        const head = vrm.humanoid.getNormalizedBoneNode('head');
+        if (head) {
+          head.rotation.y = Math.sin(gestureTime * 6) * 0.45;
+        }
+      } else if (gestureType === 'point') {
+        const rightArm = vrm.humanoid.getNormalizedBoneNode('rightUpperArm');
+        const rightFore = vrm.humanoid.getNormalizedBoneNode('rightLowerArm');
+        if (rightArm) {
+          rightArm.rotation.set(-0.6, 0.3, -1.3);
+        }
+        if (rightFore) {
+          rightFore.rotation.set(0, 0, -0.9);
+        }
+      }
+    }
+
+    window.avatarControl = {
+      sendCommand(action) {
+        handleCommand(action);
+      }
+    };
+
+    window.__flushAvatarCommands__();
+    window.__notifyFlutterReady__();
+    console.log('avatarControl 已就绪');
 
     loader.load(
-      'http://127.0.0.1:8000/static/Mushy.vrm',
+      '/static/Mushy.vrm',
       (gltf) => {
         vrm = gltf.userData.vrm;
         VRMUtils.rotateVRM0(vrm);
         scene.add(vrm.scene);
-        window.vrm = vrm; 
+        window.vrm = vrm;
 
-        // 面向观众
         vrm.scene.rotation.y = Math.PI;
-
-        // 放下手臂
-        if (vrm.humanoid) {
-          const leftArm = vrm.humanoid.getNormalizedBoneNode('leftUpperArm');
-          const rightArm = vrm.humanoid.getNormalizedBoneNode('rightUpperArm');
-          if (leftArm) leftArm.rotation.set(0, 0, 0.5);
-          if (rightArm) rightArm.rotation.set(0, 0, -0.5);
-          const leftFore = vrm.humanoid.getNormalizedBoneNode('leftLowerArm');
-          const rightFore = vrm.humanoid.getNormalizedBoneNode('rightLowerArm');
-          if (leftFore) leftFore.rotation.set(0, 0, 0.3);
-          if (rightFore) rightFore.rotation.set(0, 0, -0.3);
-        }
+        resetPose();
 
         console.log('VRM加载成功');
 
-        // ★★★ 加载完成后执行待执行的动作 ★★★
-        if (pendingAction === 'startTalking') {
-          isTalking = true;
-          talkTime = 0;
-          console.log('执行待执行动作: 开始说话');
-        } else if (pendingAction === 'stopTalking') {
-          isTalking = false;
-          talkTime = 0;
-          console.log('执行待执行动作: 停止说话');
-        } else if (pendingAction === 'wave' || pendingAction === 'nod' || pendingAction === 'shake') {
-          gestureType = pendingAction;
-          gestureTime = 0;
-          console.log('执行待执行动作:', pendingAction);
+        if (window.__pendingAction__) {
+          handleCommand(window.__pendingAction__);
+          window.__pendingAction__ = null;
         }
-        pendingAction = null;
+        window.__notifyFlutterReady__();
       },
       undefined,
       (err) => {
@@ -112,48 +217,31 @@
       }
     );
 
-    // 轮询检查全局变量（兼容 Flutter 的 evaluateJavascript 调用）
-    window.__commands__ = {
-      action: 'none',
-      timestamp: 0
-    };
-
-    setInterval(function() {
-      var cmd = window.__commands__;
-      if (cmd.timestamp > 0) {
-        if (cmd.action === 'startTalking') {
-          isTalking = true;
-          talkTime = 0;
-          console.log('轮询执行: 开始说话');
-        } else if (cmd.action === 'stopTalking') {
-          isTalking = false;
-          talkTime = 0;
-          console.log('轮询执行: 停止说话');
-        } else if (cmd.action === 'wave' || cmd.action === 'nod' || cmd.action === 'shake') {
-          gestureType = cmd.action;
-          gestureTime = 0;
-          console.log('轮询执行: 做动作', cmd.action);
-        }
-        cmd.timestamp = 0;
-        cmd.action = 'none';
-      }
-    }, 200);
-
     function animate() {
       requestAnimationFrame(animate);
-      
+
       if (vrm) {
-        vrm.update(0.016);
         time += 0.02;
-        talkTime += 0.02;
+        if (isTalking) talkTime += 0.02;
         gestureTime += 0.02;
 
-        // 呼吸效果
         vrm.scene.position.y = Math.sin(time * 2) * 0.002;
         vrm.scene.rotation.z = Math.sin(time * 0.8) * 0.006;
         vrm.scene.rotation.x = Math.sin(time * 0.6 + 1) * 0.003;
 
-        // 说话时动嘴巴
+        if (isTalking) {
+          if (gestureType === 'none' && talkTime >= nextRandomGestureAt) {
+            startGesture(pickRandomGesture());
+            scheduleNextRandomGesture();
+          }
+        }
+
+        if (gestureType !== 'none') {
+          applyGesturePose();
+        } else {
+          resetPose();
+        }
+
         if (isTalking && vrm.expressionManager) {
           const mouthValue = 0.3 + 0.7 * Math.abs(Math.sin(talkTime * 15));
           vrm.expressionManager.setValue('aa', mouthValue);
@@ -161,37 +249,9 @@
           vrm.expressionManager.setValue('aa', 0);
         }
 
-        // 做动作
-        if (gestureType === 'wave' && gestureTime < 2.0) {
-          if (vrm.humanoid) {
-            const rightArm = vrm.humanoid.getNormalizedBoneNode('rightUpperArm');
-            if (rightArm) {
-              rightArm.rotation.set(
-                0,
-                Math.sin(gestureTime * 8) * 0.3,
-                -0.5 + Math.sin(gestureTime * 8) * 0.2
-              );
-            }
-          }
-        } else if (gestureType === 'nod' && gestureTime < 1.0) {
-          if (vrm.humanoid) {
-            const head = vrm.humanoid.getNormalizedBoneNode('head');
-            if (head) {
-              head.rotation.x = Math.sin(gestureTime * 6) * 0.2;
-            }
-          }
-        } else if (gestureType === 'shake' && gestureTime < 1.0) {
-          if (vrm.humanoid) {
-            const head = vrm.humanoid.getNormalizedBoneNode('head');
-            if (head) {
-              head.rotation.y = Math.sin(gestureTime * 6) * 0.3;
-            }
-          }
-        } else if (gestureTime >= 2.0) {
-          gestureType = 'none';
-        }
+        vrm.update(0.016);
       }
-      
+
       controls.update();
       renderer.render(scene, camera);
     }

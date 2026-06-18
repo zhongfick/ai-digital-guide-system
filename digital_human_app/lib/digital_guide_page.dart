@@ -1,10 +1,14 @@
-import 'dart:math';
+import 'avatar_bridge.dart';
+import 'avatar_frame.dart';
+import 'speech_input.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
-import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+
+enum _PortalSide { visitor, admin }
 
 class DigitalGuidePage extends StatefulWidget {
   const DigitalGuidePage({super.key});
@@ -13,11 +17,7 @@ class DigitalGuidePage extends StatefulWidget {
   State<DigitalGuidePage> createState() => _DigitalGuidePageState();
 }
 
-class _DigitalGuidePageState extends State<DigitalGuidePage>
-    with SingleTickerProviderStateMixin {
-  // 动画控制
-  late AnimationController _animController;
-  double _mouthOpen = 0.0;
+class _DigitalGuidePageState extends State<DigitalGuidePage> {
   bool _isSpeaking = false;
 
   // 对话相关
@@ -26,13 +26,19 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
   bool _isLoading = false;
 
   // 语音相关
-  late stt.SpeechToText _speech;
   bool _isListening = false;
   late FlutterTts _flutterTts;
   bool _ttsReady = false;
 
   // WebView控制器
   InAppWebViewController? _webController;
+  bool _avatarReady = false;
+  final List<String> _pendingAvatarActions = [];
+  _PortalSide _selectedSide = _PortalSide.visitor;
+
+  // 管理后台/游客侧内容入口
+  final String _visitorAppUrl = "http://127.0.0.1:8000/static/avatar.html";
+  final String _adminPanelUrl = "http://127.0.0.1:8000/admin";
 
   // API地址
   final String _apiUrl = "http://127.0.0.1:8000/chat";
@@ -41,21 +47,8 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
   void initState() {
     super.initState();
 
-    // 初始化动画控制器
-    _animController =
-        AnimationController(
-          vsync: this,
-          duration: const Duration(milliseconds: 100),
-        )..addListener(() {
-          if (_isSpeaking) {
-            setState(() {
-              _mouthOpen = 0.3 + 0.4 * sin(_animController.value * 10 * pi);
-            });
-          }
-        });
-
     // 初始化语音识别
-    _speech = stt.SpeechToText();
+    _initSpeech();
 
     // 初始化语音合成
     _flutterTts = FlutterTts();
@@ -63,6 +56,9 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
 
     // 添加欢迎消息
     _messages.add({'role': 'ai', 'text': '您好！我是AI导游，请问有什么可以帮助您的？'});
+
+    // Flutter Web 通过 postMessage 接收数字人就绪信号
+    setupAvatarMessageListener(_onAvatarReady);
   }
 
   // 初始化语音合成
@@ -76,29 +72,15 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
       // 监听语音开始和结束
       _flutterTts.setStartHandler(() {
         setState(() => _isSpeaking = true);
-        _animController.repeat();
-        
-        // 告诉数字人开始说话
-        _webController?.loadUrl(
-  urlRequest: URLRequest(
-    url: WebUri('http://127.0.0.1:8000/static/avatar.html?action=startTalking'),
-  ),
-);
+        _sendAvatarAction('startTalking');
       });
 
       _flutterTts.setCompletionHandler(() {
-        setState(() {
-          _isSpeaking = false;
-          _mouthOpen = 0.0;
-        });
-        _animController.stop();
-        
-        // 告诉数字人停止说话
-        _webController?.loadUrl(
-  urlRequest: URLRequest(
-    url: WebUri('http://127.0.0.1:8000/static/avatar.html?action=stopTalking'),
-  ),
-);
+        _onSpeechEnded();
+      });
+
+      _flutterTts.setCancelHandler(() {
+        _onSpeechEnded();
       });
 
       setState(() => _ttsReady = true);
@@ -108,44 +90,193 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
     }
   }
 
-  // 开始语音输入
-  Future<void> _startListening() async {
+  // 初始化语音识别
+  Future<void> _initSpeech() async {
     try {
-      bool available = await _speech.initialize(
-        onStatus: (status) => print("语音状态: $status"),
-        onError: (error) => print("语音错误: $error"),
+      final available = await initSpeechInput(
+        onStatus: (status) {
+          print("语音状态: $status");
+          if ((status == 'done' ||
+                  status == 'notListening' ||
+                  status == 'doneNoResult') &&
+              _isListening) {
+            setState(() => _isListening = false);
+          }
+        },
+        onError: (error) {
+          print("语音错误: $error");
+          setState(() => _isListening = false);
+          _showSnackBar("语音识别失败: $error");
+        },
       );
 
       if (available) {
-        setState(() => _isListening = true);
-
-        await _speech.listen(
-          onResult: (result) {
-            setState(() {
-              _textController.text = result.recognizedWords;
-            });
-          },
-          localeId: "zh_CN",
-          listenFor: const Duration(seconds: 10),
-          pauseFor: const Duration(seconds: 3),
-        );
+        print("✅ 语音识别初始化成功，语言: $speechInputLocale");
       } else {
-        _showSnackBar("语音识别不可用，请检查麦克风权限");
+        print("❌ 语音识别不可用");
       }
     } catch (e) {
+      print("❌ 语音识别初始化失败: $e");
+    }
+  }
+
+  // 点击切换语音输入
+  Future<void> _toggleListening() async {
+    if (_isListening) {
+      await _finishListening(sendMessage: true);
+      return;
+    }
+
+    if (!speechInputAvailable) {
+      await _initSpeech();
+      if (!speechInputAvailable) {
+        _showSnackBar(speechInputUnsupportedMessage);
+        return;
+      }
+    }
+
+    if (_isSpeaking) {
+      await _stopSpeaking();
+    }
+
+    setState(() => _isListening = true);
+
+    try {
+      final started = await startSpeechInput(
+        onResult: (text, isFinal) {
+          setState(() {
+            _textController.text = text;
+          });
+          if (isFinal) {
+            _finishListening(sendMessage: true);
+          }
+        },
+        onStatus: (status) {
+          print("语音状态: $status");
+          if (status == 'notListening' && _isListening) {
+            _finishListening(sendMessage: true);
+          }
+        },
+        onError: (error) {
+          setState(() => _isListening = false);
+          if (error.contains('未检测到语音')) {
+            _showSnackBar(error);
+          } else {
+            _showSnackBar("语音识别失败: $error");
+          }
+        },
+        locale: speechInputLocale,
+      );
+
+      if (!started) {
+        setState(() => _isListening = false);
+        _showSnackBar("无法启动语音识别，请检查麦克风权限");
+      }
+    } catch (e) {
+      setState(() => _isListening = false);
       print("❌ 语音输入失败: $e");
       _showSnackBar("语音输入失败: $e");
     }
   }
 
-  // 停止语音输入
-  Future<void> _stopListening() async {
-    await _speech.stop();
+  Future<void> _finishListening({required bool sendMessage}) async {
+    if (!_isListening) return;
+
+    await stopSpeechInput();
     setState(() => _isListening = false);
 
-    // 如果识别到文字，自动发送
-    if (_textController.text.isNotEmpty) {
-      _sendMessage(_textController.text);
+    final text = _textController.text.trim();
+    if (sendMessage && text.isNotEmpty) {
+      _sendMessage(text);
+    }
+  }
+
+  // 向数字人发送动作指令
+  Future<void> _sendAvatarAction(String action) async {
+    if (kIsWeb) {
+      final sent = sendAvatarCommandToIframe(action);
+      if (!sent) {
+        _pendingAvatarActions.add(action);
+        print("⚠️ iframe未找到，指令排队: $action");
+        return;
+      }
+      print("✅ 发送数字人动作(Web): $action");
+      return;
+    }
+
+    if (_webController == null) {
+      _pendingAvatarActions.add(action);
+      print("⚠️ WebView未创建，指令排队: $action");
+      return;
+    }
+    if (!_avatarReady) {
+      _pendingAvatarActions.add(action);
+      print("⚠️ 数字人JS未就绪，指令排队: $action");
+      return;
+    }
+    try {
+      await _webController!.evaluateJavascript(
+        source: "window.sendAvatarCommand('$action');",
+      );
+      print("✅ 发送数字人动作: $action");
+    } catch (e) {
+      print("❌ 发送数字人动作失败: $e");
+    }
+  }
+
+  Future<void> _flushPendingAvatarActions() async {
+    final pending = List<String>.from(_pendingAvatarActions);
+    _pendingAvatarActions.clear();
+    for (final action in pending) {
+      await _sendAvatarAction(action);
+    }
+  }
+
+  void _onAvatarReady() {
+    if (_avatarReady) return;
+    setState(() => _avatarReady = true);
+    print("✅ 数字人JS桥接就绪");
+    _flushPendingAvatarActions();
+  }
+
+  Future<void> _waitForAvatarReady(InAppWebViewController controller) async {
+    if (kIsWeb) {
+      // Web 平台用 postMessage，不用 evaluateJavascript（跨域会被拦截）
+      return;
+    }
+    for (var i = 0; i < 30 && !_avatarReady; i++) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      try {
+        final ready = await controller.evaluateJavascript(
+          source:
+              "(window.avatarControl && window.sendAvatarCommand) ? 'ready' : 'not_ready';",
+        );
+        final readyStr = ready?.toString() ?? '';
+        if (readyStr.contains('ready') && !readyStr.contains('not_ready')) {
+          _onAvatarReady();
+          return;
+        }
+      } catch (e) {
+        print("轮询数字人就绪失败: $e");
+      }
+    }
+    print("⚠️ 数字人就绪超时");
+  }
+
+  void _onSpeechEnded() {
+    if (!_isSpeaking) return;
+    setState(() => _isSpeaking = false);
+    _sendAvatarAction('stopTalking');
+  }
+
+  // 停止语音播报
+  Future<void> _stopSpeaking() async {
+    if (!_isSpeaking) return;
+    try {
+      await _flutterTts.stop();
+    } catch (e) {
+      print("❌ 停止语音播报失败: $e");
+      _onSpeechEnded();
     }
   }
 
@@ -157,10 +288,25 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
     }
 
     try {
+      if (_isSpeaking) {
+        await _flutterTts.stop();
+      }
+      await _sendAvatarAction('startTalking');
       await _flutterTts.speak(text);
     } catch (e) {
       print("❌ 语音播报失败: $e");
+      await _sendAvatarAction('stopTalking');
     }
+  }
+
+  void _syncAvatarTalkingState(String answer) {
+    if (answer.trim().isEmpty) return;
+    _sendAvatarAction('startTalking');
+    Future.delayed(const Duration(milliseconds: 900), () {
+      if (mounted) {
+        _sendAvatarAction('stopTalking');
+      }
+    });
   }
 
   // 发送消息
@@ -193,16 +339,8 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
           _isLoading = false;
         });
 
-        // 随机做一个动作
-        final gestures = ['wave', 'nod', 'shake'];
-        final randomGesture = gestures[Random().nextInt(3)];
-        _webController?.loadUrl(
-  urlRequest: URLRequest(
-    url: WebUri('http://127.0.0.1:8000/static/avatar.html?action=$randomGesture'),
-  ),
-);
-
-        // 语音播报回答
+        // 语音播报回答，同时触发数字人动作
+        _syncAvatarTalkingState(answer);
         _speak(answer);
       }
     } catch (e) {
@@ -215,9 +353,8 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
 
   @override
   void dispose() {
-    _animController.dispose();
     _textController.dispose();
-    _speech.stop();
+    cancelSpeechInput();
     _flutterTts.stop();
     super.dispose();
   }
@@ -241,22 +378,185 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
       ),
       body: Column(
         children: [
-          // 数字人显示区域（高度固定）
-          SizedBox(
-            height: 280,
-            child: _buildDigitalPerson(),
-          ),
-
-          // 聊天记录（用 Expanded 撑满剩余空间，紧挨着数字人）
+          _buildModeSwitch(),
           Expanded(
-            child: Container(
-              color: const Color(0xFFF5F7FA),
-              child: _buildChatList(),
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 250),
+              child: _selectedSide == _PortalSide.visitor
+                  ? _buildVisitorPanel(key: const ValueKey('visitor'))
+                  : _buildAdminPanel(key: const ValueKey('admin')),
             ),
           ),
+        ],
+      ),
+    );
+  }
 
-          // 输入区域
-          _buildInputArea(),
+  Widget _buildModeSwitch() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      color: const Color(0xFFF5F7FA),
+      child: SegmentedButton<_PortalSide>(
+        segments: const [
+          ButtonSegment(value: _PortalSide.visitor, label: Text('游客交互侧'), icon: Icon(Icons.record_voice_over)),
+          ButtonSegment(value: _PortalSide.admin, label: Text('管理后台侧'), icon: Icon(Icons.admin_panel_settings)),
+        ],
+        selected: {_selectedSide},
+        onSelectionChanged: (set) {
+          setState(() => _selectedSide = set.first);
+        },
+        showSelectedIcon: false,
+      ),
+    );
+  }
+
+  Widget _buildVisitorPanel({Key? key}) {
+    return Container(
+      key: key,
+      margin: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.08),
+            blurRadius: 24,
+            offset: const Offset(0, 12),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildSectionHeader(
+            title: '游客交互侧',
+            subtitle: '语音对话 + 数字人展示',
+          ),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(24),
+              child: Stack(
+                children: [
+                  Positioned.fill(child: _buildDigitalPerson()),
+                  Positioned.fill(
+                    bottom: 0,
+                    child: Align(
+                      alignment: Alignment.bottomCenter,
+                      child: _buildInputArea(),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          SizedBox(height: 220, child: _buildChatList()),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAdminPanel({Key? key}) {
+    return Container(
+      key: key,
+      margin: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.08),
+            blurRadius: 24,
+            offset: const Offset(0, 12),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildSectionHeader(
+            title: '管理后台侧',
+            subtitle: 'FastAPI 后台首页与接口入口',
+            trailing: IconButton(
+              icon: const Icon(Icons.open_in_new),
+              onPressed: () {},
+            ),
+          ),
+          Expanded(
+            child: InAppWebView(
+              initialSettings: InAppWebViewSettings(
+                javaScriptEnabled: true,
+                domStorageEnabled: true,
+                allowsInlineMediaPlayback: true,
+                mediaPlaybackRequiresUserGesture: false,
+              ),
+              initialUrlRequest: URLRequest(url: WebUri(_adminPanelUrl)),
+              onWebViewCreated: (controller) {
+                _webController ??= controller;
+              },
+              onLoadStop: (controller, url) async {
+                print('✅ 管理后台页面加载完成');
+              },
+              onReceivedHttpError: (controller, request, errorResponse) {
+                _showSnackBar('管理后台加载失败：${errorResponse.statusCode}');
+              },
+              onLoadError: (controller, url, code, message) {
+                _showSnackBar('管理后台加载错误：$message');
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectionHeader({
+    required String title,
+    required String subtitle,
+    Widget? trailing,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [Colors.blueGrey.shade50, Colors.white],
+        ),
+        border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+                const SizedBox(height: 4),
+                Text(subtitle, style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+              ],
+            ),
+          ),
+          if (trailing != null) trailing,
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatusChip(IconData icon, String text, {bool showStop = false}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.2),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: Colors.white, size: 16),
+          const SizedBox(width: 4),
+          Text(text, style: const TextStyle(color: Colors.white, fontSize: 12)),
+          if (showStop) ...[
+            const SizedBox(width: 6),
+            const Icon(Icons.stop_circle, color: Colors.white, size: 16),
+          ],
         ],
       ),
     );
@@ -264,39 +564,25 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
 
   Widget _buildDigitalPerson() {
     return Container(
-      height: 280,
       decoration: const BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [Color(0xFF667EEA), Color(0xFF764BA2)],
         ),
-        borderRadius: BorderRadius.only(
-          bottomLeft: Radius.zero,
-          bottomRight: Radius.zero,
-        ),
       ),
       child: Stack(
         children: [
-          // 背景装饰
           Positioned(
             right: -30,
             top: -30,
-            child: CircleAvatar(
-              radius: 60,
-              backgroundColor: Colors.white.withOpacity(0.1),
-            ),
+            child: CircleAvatar(radius: 60, backgroundColor: Colors.white.withOpacity(0.1)),
           ),
           Positioned(
             left: -20,
             bottom: -20,
-            child: CircleAvatar(
-              radius: 40,
-              backgroundColor: Colors.white.withOpacity(0.08),
-            ),
+            child: CircleAvatar(radius: 40, backgroundColor: Colors.white.withOpacity(0.08)),
           ),
-
-          // ★★★ 用InAppWebView加载后端的HTML ★★★
           Center(
             child: SizedBox(
               width: double.infinity,
@@ -304,18 +590,32 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
               child: InAppWebView(
                 initialSettings: InAppWebViewSettings(
                   javaScriptEnabled: true,
+                  domStorageEnabled: true,
+                  allowsInlineMediaPlayback: true,
+                  mediaPlaybackRequiresUserGesture: false,
                 ),
-                initialUrlRequest: URLRequest(
-                  url: WebUri('http://127.0.0.1:8000/static/avatar.html'),
-                ),
+                initialUrlRequest: URLRequest(url: WebUri(avatarFrameUrl)),
                 onWebViewCreated: (controller) {
                   _webController = controller;
+                  if (!kIsWeb) {
+                    controller.addJavaScriptHandler(
+                      handlerName: 'avatarReady',
+                      callback: (args) {
+                        _onAvatarReady();
+                      },
+                    );
+                  }
+                },
+                onLoadStop: (controller, url) async {
+                  print("✅ 数字人页面HTML加载完成");
+                  await _waitForAvatarReady(controller);
+                },
+                onConsoleMessage: (controller, msg) {
+                  print("🌐 WebView: ${msg.message}");
                 },
               ),
             ),
           ),
-
-          // 语音状态指示
           Positioned(
             bottom: 10,
             left: 0,
@@ -325,49 +625,14 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   if (_isListening)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.mic, color: Colors.white, size: 16),
-                          SizedBox(width: 4),
-                          Text(
-                            "正在聆听...",
-                            style: TextStyle(color: Colors.white, fontSize: 12),
-                          ),
-                        ],
-                      ),
+                    _buildStatusChip(Icons.mic, '正在聆听...'),
+                  if (_isSpeaking) ...[
+                    const SizedBox(width: 8),
+                    GestureDetector(
+                      onTap: _stopSpeaking,
+                      child: _buildStatusChip(Icons.volume_up, '正在说话...', showStop: true),
                     ),
-                  if (_isSpeaking)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.volume_up, color: Colors.white, size: 16),
-                          SizedBox(width: 4),
-                          Text(
-                            "正在说话...",
-                            style: TextStyle(color: Colors.white, fontSize: 12),
-                          ),
-                        ],
-                      ),
-                    ),
+                  ],
                 ],
               ),
             ),
@@ -461,20 +726,12 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: Colors.white,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
-            offset: const Offset(0, -2),
-          ),
-        ],
+        border: Border(top: BorderSide(color: Colors.grey.shade200)),
       ),
       child: Row(
         children: [
-          // 语音输入按钮
           GestureDetector(
-            onLongPress: _startListening,
-            onLongPressUp: _stopListening,
+            onTap: _toggleListening,
             child: Container(
               width: 48,
               height: 48,
@@ -489,12 +746,25 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
             ),
           ),
           const SizedBox(width: 10),
-          // 文本输入框
+          if (_isSpeaking)
+            GestureDetector(
+              onTap: _stopSpeaking,
+              child: Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: Colors.red[400],
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.stop, color: Colors.white),
+              ),
+            ),
+          if (_isSpeaking) const SizedBox(width: 10),
           Expanded(
             child: TextField(
               controller: _textController,
               decoration: InputDecoration(
-                hintText: _isListening ? "正在聆听..." : "输入您的问题...",
+                hintText: _isListening ? "正在聆听，再次点击麦克风结束..." : "输入您的问题，或点击麦克风语音输入",
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(25),
                   borderSide: BorderSide.none,
@@ -510,7 +780,6 @@ class _DigitalGuidePageState extends State<DigitalGuidePage>
             ),
           ),
           const SizedBox(width: 10),
-          // 发送按钮
           GestureDetector(
             onTap: () => _sendMessage(_textController.text.trim()),
             child: Container(
