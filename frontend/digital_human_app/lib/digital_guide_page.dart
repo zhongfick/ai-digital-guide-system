@@ -302,11 +302,6 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
   void _syncAvatarTalkingState(String answer) {
     if (answer.trim().isEmpty) return;
     _sendAvatarAction('startTalking');
-    Future.delayed(const Duration(milliseconds: 900), () {
-      if (mounted) {
-        _sendAvatarAction('stopTalking');
-      }
-    });
   }
 
   // 发送消息
@@ -339,7 +334,7 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
           _isLoading = false;
         });
 
-        // 语音播报回答，同时触发数字人动作
+        // 语音播报回答，同时让数字人保持谈话状态，直到播报结束再切回待机
         _syncAvatarTalkingState(answer);
         _speak(answer);
       }
@@ -435,15 +430,12 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
           Expanded(
             child: ClipRRect(
               borderRadius: BorderRadius.circular(24),
-              child: Stack(
+              child: Column(
                 children: [
-                  Positioned.fill(child: _buildDigitalPerson()),
-                  Positioned.fill(
-                    bottom: 0,
-                    child: Align(
-                      alignment: Alignment.bottomCenter,
-                      child: _buildInputArea(),
-                    ),
+                  Expanded(child: _buildDigitalPerson()),
+                  SafeArea(
+                    top: false,
+                    child: _buildInputArea(),
                   ),
                 ],
               ),
@@ -475,33 +467,288 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
         children: [
           _buildSectionHeader(
             title: '管理后台侧',
-            subtitle: 'FastAPI 后台首页与接口入口',
-            trailing: IconButton(
-              icon: const Icon(Icons.open_in_new),
-              onPressed: () {},
+            subtitle: '知识库、数字人配置、游客分析与数据大屏',
+            trailing: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF667EEA),
+                borderRadius: BorderRadius.circular(999),
+              ),
+              child: const Text(
+                '运营总览',
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+              ),
             ),
           ),
           Expanded(
-            child: InAppWebView(
-              initialSettings: InAppWebViewSettings(
-                javaScriptEnabled: true,
-                domStorageEnabled: true,
-                allowsInlineMediaPlayback: true,
-                mediaPlaybackRequiresUserGesture: false,
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _buildDashboardOverview(),
+                  const SizedBox(height: 16),
+                  _buildAdminSectionCard(
+                    icon: Icons.menu_book_rounded,
+                    title: '1) 知识库管理',
+                    subtitle: '上传、更新和维护景区讲解词、文史资料、常见问题及答案等知识文档。',
+                    accent: const Color(0xFF5B8DEF),
+                    child: _buildKnowledgeLibraryPanel(),
+                  ),
+                  const SizedBox(height: 16),
+                  _buildAdminSectionCard(
+                    icon: Icons.face_retouching_natural_rounded,
+                    title: '2) 数字人形象管理',
+                    subtitle: '配置数字人的外观、服装、声音与风格，使其更贴合景区文化特色。',
+                    accent: const Color(0xFF7C5CFF),
+                    child: _buildAvatarManagementPanel(),
+                  ),
+                  const SizedBox(height: 16),
+                  _buildAdminSectionCard(
+                    icon: Icons.analytics_rounded,
+                    title: '3) 游客感受度报告',
+                    subtitle: '分析交互记录，生成游客关注点、情感趋势与服务建议反馈。',
+                    accent: const Color(0xFF18A999),
+                    child: _buildVisitorReportPanel(),
+                  ),
+                  const SizedBox(height: 16),
+                  _buildAdminSectionCard(
+                    icon: Icons.dashboard_rounded,
+                    title: '4) 数据大屏概览',
+                    subtitle: '展示当日 / 本周服务人次、热门问答、游客满意度趋势等核心运营数据。',
+                    accent: const Color(0xFFF59E0B),
+                    child: _buildDataScreenPanel(),
+                  ),
+                ],
               ),
-              initialUrlRequest: URLRequest(url: WebUri(_adminPanelUrl)),
-              onWebViewCreated: (controller) {
-                _webController ??= controller;
-              },
-              onLoadStop: (controller, url) async {
-                print('✅ 管理后台页面加载完成');
-              },
-              onReceivedHttpError: (controller, request, errorResponse) {
-                _showSnackBar('管理后台加载失败：${errorResponse.statusCode}');
-              },
-              onLoadError: (controller, url, code, message) {
-                _showSnackBar('管理后台加载错误：$message');
-              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDashboardOverview() {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF667EEA), Color(0xFF764BA2)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF667EEA).withOpacity(0.25),
+            blurRadius: 20,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '管理后台概览',
+            style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '统一查看知识运营、数字人配置、用户反馈和服务运营表现。',
+            style: TextStyle(color: Colors.white.withOpacity(0.9), fontSize: 13),
+          ),
+          const SizedBox(height: 18),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              return Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  _buildMetricCard('今日服务人次', '1,286', Icons.people_alt_rounded, constraints.maxWidth),
+                  _buildMetricCard('本周热门问答', '42', Icons.question_answer_rounded, constraints.maxWidth),
+                  _buildMetricCard('满意度趋势', '96.4%', Icons.sentiment_satisfied_alt_rounded, constraints.maxWidth),
+                  _buildMetricCard('新增知识文档', '18', Icons.note_add_rounded, constraints.maxWidth),
+                ],
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMetricCard(String label, String value, IconData icon, double width) {
+    final cardWidth = width > 700 ? (width - 36) / 4 : width > 500 ? (width - 12) / 2 : width;
+    return Container(
+      width: cardWidth,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.14),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white.withOpacity(0.18)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.18),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Icon(icon, color: Colors.white, size: 22),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(value, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
+                const SizedBox(height: 2),
+                Text(label, style: TextStyle(color: Colors.white.withOpacity(0.9), fontSize: 12)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAdminSectionCard({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required Color accent,
+    required Widget child,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.grey.shade200),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.03),
+            blurRadius: 18,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: accent.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Icon(icon, color: accent, size: 24),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 4),
+                    Text(subtitle, style: TextStyle(fontSize: 13, color: Colors.grey.shade600)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          child,
+        ],
+      ),
+    );
+  }
+
+  Widget _buildKnowledgeLibraryPanel() {
+    return Wrap(
+      spacing: 12,
+      runSpacing: 12,
+      children: [
+        _buildInfoTile(Icons.upload_file_rounded, '文档上传', '支持讲解词、文史资料、FAQ 批量导入'),
+        _buildInfoTile(Icons.edit_note_rounded, '内容维护', '支持版本更新、审核与发布回滚'),
+        _buildInfoTile(Icons.search_rounded, '知识检索', '按景点、主题、关键词快速查找'),
+        _buildInfoTile(Icons.security_rounded, '权限管理', '管理员可分角色维护知识内容'),
+      ],
+    );
+  }
+
+  Widget _buildAvatarManagementPanel() {
+    return Wrap(
+      spacing: 12,
+      runSpacing: 12,
+      children: [
+        _buildInfoTile(Icons.checkroom_rounded, '外观配置', '设置数字人形象、发型、配色与风格'),
+        _buildInfoTile(Icons.volunteer_activism_rounded, '服装主题', '按景区文化选择不同服装模板'),
+        _buildInfoTile(Icons.record_voice_over_rounded, '声音设置', '配置音色、语速、语调与播报风格'),
+        _buildInfoTile(Icons.palette_rounded, '文化贴合', '让数字人形象与景区特色一致'),
+      ],
+    );
+  }
+
+  Widget _buildVisitorReportPanel() {
+    return Column(
+      children: [
+        _buildInfoTile(Icons.insights_rounded, '关注点分析', '统计游客最常询问的景点、路线与服务问题'),
+        const SizedBox(height: 12),
+        _buildInfoTile(Icons.auto_graph_rounded, '情感趋势报告', '分析咨询过程中的情绪变化与满意度波动'),
+        const SizedBox(height: 12),
+        _buildInfoTile(Icons.feedback_rounded, '服务建议', '输出高频投诉点、优化建议与改进优先级'),
+      ],
+    );
+  }
+
+  Widget _buildDataScreenPanel() {
+    return Wrap(
+      spacing: 12,
+      runSpacing: 12,
+      children: [
+        _buildInfoTile(Icons.today_rounded, '当日服务人次', '实时显示今日接待与咨询量'),
+        _buildInfoTile(Icons.calendar_view_week_rounded, '本周服务人次', '按周汇总运营趋势与峰值时段'),
+        _buildInfoTile(Icons.local_fire_department_rounded, '热门问答', '展示近期高频问答与知识热点'),
+        _buildInfoTile(Icons.sentiment_satisfied_rounded, '满意度趋势', '查看游客满意度变化与健康度'),
+      ],
+    );
+  }
+
+  Widget _buildInfoTile(IconData icon, String title, String desc) {
+    return Container(
+      constraints: const BoxConstraints(minWidth: 170),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFF),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFE6ECFF)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF667EEA).withOpacity(0.12),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(icon, color: const Color(0xFF667EEA), size: 20),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+                const SizedBox(height: 4),
+                Text(desc, style: TextStyle(fontSize: 12, color: Colors.grey.shade600, height: 1.35)),
+              ],
             ),
           ),
         ],
@@ -564,6 +811,8 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
 
   Widget _buildDigitalPerson() {
     return Container(
+      width: double.infinity,
+      height: double.infinity,
       decoration: const BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
@@ -572,6 +821,7 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
         ),
       ),
       child: Stack(
+        fit: StackFit.expand,
         children: [
           Positioned(
             right: -30,
@@ -583,37 +833,35 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
             bottom: -20,
             child: CircleAvatar(radius: 40, backgroundColor: Colors.white.withOpacity(0.08)),
           ),
-          Center(
-            child: SizedBox(
-              width: double.infinity,
-              height: 260,
-              child: InAppWebView(
-                initialSettings: InAppWebViewSettings(
-                  javaScriptEnabled: true,
-                  domStorageEnabled: true,
-                  allowsInlineMediaPlayback: true,
-                  mediaPlaybackRequiresUserGesture: false,
-                ),
-                initialUrlRequest: URLRequest(url: WebUri(avatarFrameUrl)),
-                onWebViewCreated: (controller) {
-                  _webController = controller;
-                  if (!kIsWeb) {
-                    controller.addJavaScriptHandler(
-                      handlerName: 'avatarReady',
-                      callback: (args) {
-                        _onAvatarReady();
-                      },
-                    );
-                  }
-                },
-                onLoadStop: (controller, url) async {
-                  print("✅ 数字人页面HTML加载完成");
-                  await _waitForAvatarReady(controller);
-                },
-                onConsoleMessage: (controller, msg) {
-                  print("🌐 WebView: ${msg.message}");
-                },
+          Positioned.fill(
+            child: InAppWebView(
+              initialSettings: InAppWebViewSettings(
+                javaScriptEnabled: true,
+                domStorageEnabled: true,
+                allowsInlineMediaPlayback: true,
+                mediaPlaybackRequiresUserGesture: false,
+                transparentBackground: true,
+                isInspectable: kIsWeb,
               ),
+              initialUrlRequest: URLRequest(url: WebUri(avatarFrameUrl)),
+              onWebViewCreated: (controller) {
+                _webController = controller;
+                if (!kIsWeb) {
+                  controller.addJavaScriptHandler(
+                    handlerName: 'avatarReady',
+                    callback: (args) {
+                      _onAvatarReady();
+                    },
+                  );
+                }
+              },
+              onLoadStop: (controller, url) async {
+                print("✅ 数字人页面HTML加载完成");
+                await _waitForAvatarReady(controller);
+              },
+              onConsoleMessage: (controller, msg) {
+                print("🌐 WebView: ${msg.message}");
+              },
             ),
           ),
           Positioned(
