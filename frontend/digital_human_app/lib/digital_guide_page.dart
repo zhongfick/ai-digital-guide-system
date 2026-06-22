@@ -36,9 +36,6 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
   final List<String> _pendingAvatarActions = [];
   _PortalSide _selectedSide = _PortalSide.visitor;
 
-  // 管理后台/游客侧内容入口
-  final String _visitorAppUrl = "http://127.0.0.1:8000/static/avatar.html";
-  final String _adminPanelUrl = "http://127.0.0.1:8000/admin";
 
   // API地址
   final String _apiUrl = "http://127.0.0.1:8000/chat";
@@ -84,9 +81,9 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
       });
 
       setState(() => _ttsReady = true);
-      print("✅ 语音合成初始化成功");
+      debugPrint("✅ 语音合成初始化成功");
     } catch (e) {
-      print("❌ 语音合成初始化失败: $e");
+      debugPrint("❌ 语音合成初始化失败: $e");
     }
   }
 
@@ -95,7 +92,7 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
     try {
       final available = await initSpeechInput(
         onStatus: (status) {
-          print("语音状态: $status");
+          debugPrint("语音状态: $status");
           if ((status == 'done' ||
                   status == 'notListening' ||
                   status == 'doneNoResult') &&
@@ -104,19 +101,19 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
           }
         },
         onError: (error) {
-          print("语音错误: $error");
+          debugPrint("语音错误: $error");
           setState(() => _isListening = false);
           _showSnackBar("语音识别失败: $error");
         },
       );
 
       if (available) {
-        print("✅ 语音识别初始化成功，语言: $speechInputLocale");
+        debugPrint("✅ 语音识别初始化成功，语言: $speechInputLocale");
       } else {
-        print("❌ 语音识别不可用");
+        debugPrint("❌ 语音识别不可用");
       }
     } catch (e) {
-      print("❌ 语音识别初始化失败: $e");
+      debugPrint("❌ 语音识别初始化失败: $e");
     }
   }
 
@@ -152,7 +149,7 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
           }
         },
         onStatus: (status) {
-          print("语音状态: $status");
+         debugPrint("语音状态: $status");
           if (status == 'notListening' && _isListening) {
             _finishListening(sendMessage: true);
           }
@@ -174,7 +171,7 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
       }
     } catch (e) {
       setState(() => _isListening = false);
-      print("❌ 语音输入失败: $e");
+      debugPrint("❌ 语音输入失败: $e");
       _showSnackBar("语音输入失败: $e");
     }
   }
@@ -197,30 +194,30 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
       final sent = sendAvatarCommandToIframe(action);
       if (!sent) {
         _pendingAvatarActions.add(action);
-        print("⚠️ iframe未找到，指令排队: $action");
+        debugPrint("⚠️ iframe未找到，指令排队: $action");
         return;
       }
-      print("✅ 发送数字人动作(Web): $action");
+      debugPrint("✅ 发送数字人动作(Web): $action");
       return;
     }
 
     if (_webController == null) {
       _pendingAvatarActions.add(action);
-      print("⚠️ WebView未创建，指令排队: $action");
+      debugPrint("⚠️ WebView未创建，指令排队: $action");
       return;
     }
     if (!_avatarReady) {
       _pendingAvatarActions.add(action);
-      print("⚠️ 数字人JS未就绪，指令排队: $action");
+      debugPrint("⚠️ 数字人JS未就绪，指令排队: $action");
       return;
     }
     try {
       await _webController!.evaluateJavascript(
         source: "window.sendAvatarCommand('$action');",
       );
-      print("✅ 发送数字人动作: $action");
+      debugPrint("✅ 发送数字人动作: $action");
     } catch (e) {
-      print("❌ 发送数字人动作失败: $e");
+      debugPrint("❌ 发送数字人动作失败: $e");
     }
   }
 
@@ -235,7 +232,7 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
   void _onAvatarReady() {
     if (_avatarReady) return;
     setState(() => _avatarReady = true);
-    print("✅ 数字人JS桥接就绪");
+    debugPrint("✅ 数字人JS桥接就绪");
     _flushPendingAvatarActions();
   }
 
@@ -257,10 +254,10 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
           return;
         }
       } catch (e) {
-        print("轮询数字人就绪失败: $e");
+        debugPrint("轮询数字人就绪失败: $e");
       }
     }
-    print("⚠️ 数字人就绪超时");
+    debugPrint("⚠️ 数字人就绪超时");
   }
 
   void _onSpeechEnded() {
@@ -275,7 +272,7 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
     try {
       await _flutterTts.stop();
     } catch (e) {
-      print("❌ 停止语音播报失败: $e");
+      debugPrint("❌ 停止语音播报失败: $e");
       _onSpeechEnded();
     }
   }
@@ -283,7 +280,7 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
   // 语音播报
   Future<void> _speak(String text) async {
     if (!_ttsReady) {
-      print("⚠️ 语音合成未就绪");
+      debugPrint("⚠️ 语音合成未就绪");
       return;
     }
 
@@ -294,7 +291,7 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
       await _sendAvatarAction('startTalking');
       await _flutterTts.speak(text);
     } catch (e) {
-      print("❌ 语音播报失败: $e");
+      debugPrint("❌ 语音播报失败: $e");
       await _sendAvatarAction('stopTalking');
     }
   }
@@ -393,8 +390,8 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
       color: const Color(0xFFF5F7FA),
       child: SegmentedButton<_PortalSide>(
         segments: const [
-          ButtonSegment(value: _PortalSide.visitor, label: Text('游客交互侧'), icon: Icon(Icons.record_voice_over)),
-          ButtonSegment(value: _PortalSide.admin, label: Text('管理后台侧'), icon: Icon(Icons.admin_panel_settings)),
+          ButtonSegment(value: _PortalSide.visitor, label: Text('游客交互'), icon: Icon(Icons.record_voice_over)),
+          ButtonSegment(value: _PortalSide.admin, label: Text('管理后台'), icon: Icon(Icons.admin_panel_settings)),
         ],
         selected: {_selectedSide},
         onSelectionChanged: (set) {
@@ -424,8 +421,8 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _buildSectionHeader(
-            title: '游客交互侧',
-            subtitle: '语音对话 + 数字人展示',
+            title: '导游在此！',
+            subtitle: '欢迎各位游客',
           ),
           Expanded(
             child: ClipRRect(
@@ -466,8 +463,8 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _buildSectionHeader(
-            title: '管理后台侧',
-            subtitle: '知识库、数字人配置、游客分析与数据大屏',
+            title: '管理后台',
+            subtitle: '知识库、数字人配置、游客分析与数据概览',
             trailing: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
@@ -490,7 +487,7 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
                   const SizedBox(height: 16),
                   _buildAdminSectionCard(
                     icon: Icons.menu_book_rounded,
-                    title: '1) 知识库管理',
+                    title: '知识库管理',
                     subtitle: '上传、更新和维护景区讲解词、文史资料、常见问题及答案等知识文档。',
                     accent: const Color(0xFF5B8DEF),
                     child: _buildKnowledgeLibraryPanel(),
@@ -498,7 +495,7 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
                   const SizedBox(height: 16),
                   _buildAdminSectionCard(
                     icon: Icons.face_retouching_natural_rounded,
-                    title: '2) 数字人形象管理',
+                    title: '数字人形象管理',
                     subtitle: '配置数字人的外观、服装、声音与风格，使其更贴合景区文化特色。',
                     accent: const Color(0xFF7C5CFF),
                     child: _buildAvatarManagementPanel(),
@@ -506,19 +503,12 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
                   const SizedBox(height: 16),
                   _buildAdminSectionCard(
                     icon: Icons.analytics_rounded,
-                    title: '3) 游客感受度报告',
+                    title: '游客感受度报告',
                     subtitle: '分析交互记录，生成游客关注点、情感趋势与服务建议反馈。',
                     accent: const Color(0xFF18A999),
                     child: _buildVisitorReportPanel(),
                   ),
-                  const SizedBox(height: 16),
-                  _buildAdminSectionCard(
-                    icon: Icons.dashboard_rounded,
-                    title: '4) 数据大屏概览',
-                    subtitle: '展示当日 / 本周服务人次、热门问答、游客满意度趋势等核心运营数据。',
-                    accent: const Color(0xFFF59E0B),
-                    child: _buildDataScreenPanel(),
-                  ),
+
                 ],
               ),
             ),
@@ -566,7 +556,7 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
                 runSpacing: 12,
                 children: [
                   _buildMetricCard('今日服务人次', '1,286', Icons.people_alt_rounded, constraints.maxWidth),
-                  _buildMetricCard('本周热门问答', '42', Icons.question_answer_rounded, constraints.maxWidth),
+                  _buildMetricCard('本周问答', '42', Icons.question_answer_rounded, constraints.maxWidth),
                   _buildMetricCard('满意度趋势', '96.4%', Icons.sentiment_satisfied_alt_rounded, constraints.maxWidth),
                   _buildMetricCard('新增知识文档', '18', Icons.note_add_rounded, constraints.maxWidth),
                 ],
@@ -676,8 +666,8 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
       children: [
         _buildInfoTile(Icons.upload_file_rounded, '文档上传', '支持讲解词、文史资料、FAQ 批量导入'),
         _buildInfoTile(Icons.edit_note_rounded, '内容维护', '支持版本更新、审核与发布回滚'),
-        _buildInfoTile(Icons.search_rounded, '知识检索', '按景点、主题、关键词快速查找'),
-        _buildInfoTile(Icons.security_rounded, '权限管理', '管理员可分角色维护知识内容'),
+       
+        
       ],
     );
   }
@@ -688,9 +678,6 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
       runSpacing: 12,
       children: [
         _buildInfoTile(Icons.checkroom_rounded, '外观配置', '设置数字人形象、发型、配色与风格'),
-        _buildInfoTile(Icons.volunteer_activism_rounded, '服装主题', '按景区文化选择不同服装模板'),
-        _buildInfoTile(Icons.record_voice_over_rounded, '声音设置', '配置音色、语速、语调与播报风格'),
-        _buildInfoTile(Icons.palette_rounded, '文化贴合', '让数字人形象与景区特色一致'),
       ],
     );
   }
@@ -707,18 +694,7 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
     );
   }
 
-  Widget _buildDataScreenPanel() {
-    return Wrap(
-      spacing: 12,
-      runSpacing: 12,
-      children: [
-        _buildInfoTile(Icons.today_rounded, '当日服务人次', '实时显示今日接待与咨询量'),
-        _buildInfoTile(Icons.calendar_view_week_rounded, '本周服务人次', '按周汇总运营趋势与峰值时段'),
-        _buildInfoTile(Icons.local_fire_department_rounded, '热门问答', '展示近期高频问答与知识热点'),
-        _buildInfoTile(Icons.sentiment_satisfied_rounded, '满意度趋势', '查看游客满意度变化与健康度'),
-      ],
-    );
-  }
+
 
   Widget _buildInfoTile(IconData icon, String title, String desc) {
     return Container(
