@@ -82,6 +82,13 @@ class ReportRequest(BaseModel):
     limit: int = 30
 
 
+class MetricsResponse(BaseModel):
+    today_services: int
+    weekly_questions: int
+    satisfaction_rate: float
+    knowledge_docs: int
+
+
 def _is_allowed_knowledge_file(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_KNOWLEDGE_EXTENSIONS
 
@@ -105,6 +112,45 @@ def _load_history_records() -> list[dict]:
             except Exception:
                 continue
     return records
+
+
+def _count_knowledge_documents() -> int:
+    return sum(1 for path in KNOWLEDGE_DIR.iterdir() if path.is_file())
+
+
+def _compute_satisfaction_rate(records: list[dict]) -> float:
+    if not records:
+        return 0.0
+    scores = []
+    for item in records:
+        text = f"{item.get('question', '')} {item.get('answer', '')}"
+        score = 0
+        for word in POSITIVE_WORDS:
+            score += text.count(word)
+        for word in NEGATIVE_WORDS:
+            score -= text.count(word)
+        scores.append(score)
+    positive = sum(1 for score in scores if score >= 0)
+    return round((positive / len(scores)) * 100, 1)
+
+
+@app.get("/dashboard/metrics")
+async def get_dashboard_metrics():
+    records = _load_history_records()
+    today = datetime.now().date().isoformat()
+    today_services = sum(1 for item in records if str(item.get("timestamp", "")).startswith(today))
+    weekly_questions = len(records[-7:]) if len(records) >= 7 else len(records)
+    satisfaction_rate = _compute_satisfaction_rate(records[-30:])
+    knowledge_docs = _count_knowledge_documents()
+    return {
+        "success": True,
+        "data": {
+            "today_services": today_services,
+            "weekly_questions": weekly_questions,
+            "satisfaction_rate": satisfaction_rate,
+            "knowledge_docs": knowledge_docs,
+        },
+    }
 
 
 @app.get("/knowledge/files")

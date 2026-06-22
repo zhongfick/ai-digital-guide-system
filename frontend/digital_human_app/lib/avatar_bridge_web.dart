@@ -18,18 +18,39 @@ void setupAvatarMessageListener(void Function() onReady) {
 
 bool sendAvatarCommandToIframe(String action) {
   final payload = jsonEncode({'type': 'avatarCommand', 'action': action});
+  final iframes = html.document.querySelectorAll('iframe');
+  html.window.console.log('[flutter-bridge] sendAvatarCommandToIframe action=$action iframeCount=${iframes.length}');
 
+  void dispatchToFrame(html.IFrameElement frame) {
+    html.window.console.log('[flutter-bridge] dispatch to iframe src=${frame.src} id=${frame.id}');
+    
+    // 直接通过 postMessage 发送，不使用 localStorage
+    try {
+      frame.contentWindow?.postMessage(payload, html.window.location.origin);
+      html.window.console.log('[flutter-bridge] postMessage success action=$action');
+    } catch (e) {
+      html.window.console.log('[flutter-bridge] postMessage origin failed, retry *: $e');
+      try {
+        frame.contentWindow?.postMessage(payload, '*');
+      } catch (e2) {
+        html.window.console.log('[flutter-bridge] postMessage * also failed: $e2');
+      }
+    }
+  }
+
+  var sent = false;
   final iframeById = html.document.querySelector('#avatar-frame');
   if (iframeById is html.IFrameElement) {
-    iframeById.contentWindow?.postMessage(payload, '*');
-    return true;
+    dispatchToFrame(iframeById);
+    sent = true;
   }
 
-  final anyIframe = html.document.querySelector('iframe');
-  if (anyIframe is html.IFrameElement) {
-    anyIframe.contentWindow?.postMessage(payload, '*');
-    return true;
+  for (final node in iframes) {
+    if (node is html.IFrameElement) {
+      dispatchToFrame(node);
+      sent = true;
+    }
   }
 
-  return false;
+  return sent;
 }

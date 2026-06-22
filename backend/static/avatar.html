@@ -8,22 +8,50 @@
   <!-- 非 module 脚本：页面一加载就可用，解决 App WebView 指令过早发送的问题 -->
   <script>
     window.__avatarCommandQueue__ = [];
+    window.__avatarPendingAction__ = null;
+    window.__avatarPendingAt__ = 0;
+    window.__avatarTalkingLoopEnabled__ = false;
     window.sendAvatarCommand = function(action) {
+      console.log('[avatar] sendAvatarCommand 收到:', action, 'ready=', !!(window.avatarControl && window.avatarControl.sendCommand));
       if (window.avatarControl && window.avatarControl.sendCommand) {
         window.avatarControl.sendCommand(action);
         return true;
       }
       window.__avatarCommandQueue__.push(action);
-      console.log('指令已排队:', action);
+      console.log('[avatar] 指令已排队:', action, 'queueLength=', window.__avatarCommandQueue__.length);
       return false;
     };
     window.__flushAvatarCommands__ = function() {
+      console.log('[avatar] flush queued commands, count=', window.__avatarCommandQueue__.length);
       while (window.__avatarCommandQueue__.length > 0) {
         var cmd = window.__avatarCommandQueue__.shift();
         window.avatarControl.sendCommand(cmd);
-        console.log('执行排队指令:', cmd);
+        console.log('[avatar] 执行排队指令:', cmd);
       }
     };
+    window.__setAvatarAction__ = function(action) {
+      window.__avatarPendingAction__ = action;
+      window.__avatarPendingAt__ = Date.now();
+      console.log('[avatar] __setAvatarAction:', action, 'at=', window.__avatarPendingAt__);
+      return true;
+    };
+    function syncPendingActionFromStorage() {
+      try {
+        const storedAction = window.localStorage ? window.localStorage.getItem('avatarPendingAction') : null;
+        const storedAt = window.localStorage ? window.localStorage.getItem('avatarPendingAt') : null;
+        if (storedAction) {
+          window.__avatarPendingAction__ = storedAction;
+          window.__avatarPendingAt__ = Number(storedAt || Date.now());
+          if (window.localStorage) {
+            window.localStorage.removeItem('avatarPendingAction');
+            window.localStorage.removeItem('avatarPendingAt');
+          }
+          console.log('[avatar] 从 localStorage 同步动作:', storedAction, 'at=', window.__avatarPendingAt__);
+        }
+      } catch (e) {
+        console.log('[avatar] 同步 localStorage 动作失败:', e);
+      }
+    }
     window.__notifyFlutterReady__ = function() {
       if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
         window.flutter_inappwebview.callHandler('avatarReady');
@@ -31,12 +59,18 @@
       window.parent.postMessage(JSON.stringify({ type: 'avatarReady' }), '*');
     };
     window.addEventListener('message', function(event) {
+      console.log('[avatar] message 事件:', { origin: event.origin, data: event.data });
       try {
         var data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
         if (data && data.type === 'avatarCommand' && data.action) {
+          console.log('[avatar] message 收到动作:', data.action);
+          window.__setAvatarAction__(data.action);
           window.sendAvatarCommand(data.action);
+          window.__avatarState__ = { guideType, activeState, pendingState, lastAction: data.action, lastMessageOrigin: event.origin };
         }
-      } catch (e) {}
+      } catch (e) {
+        console.log('[avatar] message 解析失败:', e, 'raw=', event.data);
+      }
     });
   </script>
 
@@ -93,23 +127,42 @@
     const clock = new THREE.Clock();
 
     let avatarRoot = null;
-    let mixer = null;
-    let idleAction = null;
-    let talkingAction = null;
-    let currentAction = null;
     let activeState = 'idle';
     let pendingState = 'idle';
-    let idleClip = null;
-    let talkingClip = null;
     let talkIntensity = 0;
+    const urlGuideType = new URLSearchParams(window.location.search).get('guide');
+    let guideType = urlGuideType || (window.localStorage && window.localStorage.getItem('avatarGuideType')) || 'mouse';
+    let currentSet = null;
+    console.log('[avatar] 初始化导游类型:', guideType, 'urlGuideType=', urlGuideType, 'localStorage=', window.localStorage ? window.localStorage.getItem('avatarGuideType') : null, 'location=', window.location.href);
+    const ANIMATION_SETS = {
+      mouse: {
+        idle: '/static/Idle.fbx',
+        talking: '/static/Talking.fbx'
+      },
+      human: {
+        idle: '/static/humanidle.fbx',
+        talking: '/static/humantalking.fbx'
+      }
+    };
+    window.__avatarState__ = { guideType, activeState, pendingState };
 
     function clamp(v, min, max) {
       return Math.max(min, Math.min(max, v));
     }
 
     function loadClipFromFBX(path) {
+      console.log('[avatar] loadClipFromFBX 请求:', path);
       return new Promise((resolve, reject) => {
-        loader.load(path, resolve, undefined, reject);
+        loader.load(path, (fbx) => {
+          console.log('[avatar] loadClipFromFBX 完成:', path, {
+            hasScene: !!(fbx && fbx.scene),
+            animationCount: fbx && fbx.animations ? fbx.animations.length : 0,
+          });
+          resolve(fbx);
+        }, undefined, (err) => {
+          console.error('[avatar] loadClipFromFBX 失败:', path, err);
+          reject(err);
+        });
       });
     }
 
@@ -162,56 +215,181 @@
       avatarRoot.scale.setScalar(1);
       scene.add(avatarRoot);
       fitAvatarToView(avatarRoot);
-      mixer = new THREE.AnimationMixer(avatarRoot);
     }
 
-    function stopAction(action) {
-      if (!action) return;
-      action.stop();
-      action.paused = true;
-      action.enabled = false;
-    }
-
-    function playAction(action) {
-      if (!action) return;
-      action.enabled = true;
-      action.paused = false;
-      action.reset();
-      action.setLoop(THREE.LoopRepeat);
-      action.clampWhenFinished = false;
-      action.timeScale = 1;
-      action.play();
-      currentAction = action;
-    }
-
-    function setTalkingState(isTalking) {
-      activeState = isTalking ? 'talking' : 'idle';
-      if (isTalking) {
-        stopAction(idleAction);
-        playAction(talkingAction || idleAction);
-      } else {
-        stopAction(talkingAction);
-        playAction(idleAction || talkingAction);
+    function stopAvatarAnimation() {
+      if (currentSet && currentSet.mixer) {
+        currentSet.mixer.stopAllAction();
+        currentSet.mixer.update(0);
       }
     }
 
+    function getClipAction(set, state) {
+      if (!set || !set.mixer) return null;
+      const clip = state === 'talking' ? set.talkingClip : set.idleClip;
+      console.log('[avatar] getClipAction:', state, {
+        hasMixer: !!set.mixer,
+        hasClip: !!clip,
+        clipName: clip ? clip.name : null,
+        tracks: clip && clip.tracks ? clip.tracks.length : 0,
+        duration: clip ? clip.duration : null,
+      });
+      if (!clip) return null;
+      const action = set.mixer.clipAction(clip);
+      action.reset();
+      action.setLoop(THREE.LoopRepeat);
+      action.clampWhenFinished = false;
+      action.enabled = true;
+      action.paused = false;
+      action.timeScale = 1;
+      console.log('[avatar] action prepared:', state, {
+        enabled: action.enabled,
+        paused: action.paused,
+        timeScale: action.timeScale,
+      });
+      return action;
+    }
+
+    function playState(state) {
+      if (!currentSet) return;
+      stopAvatarAnimation();
+      const action = getClipAction(currentSet, state);
+      if (action) {
+        action.reset();
+        action.enabled = true;
+        action.paused = false;
+        action.setEffectiveWeight(1);
+        action.setEffectiveTimeScale(1);
+        action.fadeIn(0.08);
+        action.play();
+        console.log('[avatar] playState 启动动画:', state, action.getClip ? action.getClip().name : 'unknown', {
+          mixerTime: currentSet && currentSet.mixer ? currentSet.mixer.time : null,
+          actionTime: action.time,
+          weight: action.getEffectiveWeight ? action.getEffectiveWeight() : null,
+          running: action.isRunning ? action.isRunning() : null,
+        });
+      } else {
+        console.log('[avatar] playState 未找到动画:', state);
+      }
+      activeState = state;
+      pendingState = state;
+      window.__avatarState__ = { guideType, activeState, pendingState };
+    }
+
+    function stopCurrentActions() {
+      stopAvatarAnimation();
+    }
+
+    function loadAvatarSet(type) {
+      const set = ANIMATION_SETS[type];
+      console.log('[avatar] 开始加载角色套装:', type, set, 'guideType=', guideType);
+      return Promise.all([
+        loadClipFromFBX(set.idle),
+        loadClipFromFBX(set.talking)
+      ]).then(([idleFbx, talkingFbx]) => {
+        console.log('[avatar] 资源加载完成:', {
+          type,
+          idleAnimations: idleFbx.animations ? idleFbx.animations.length : 0,
+          talkingAnimations: talkingFbx.animations ? talkingFbx.animations.length : 0,
+        });
+        const idleScene = idleFbx.scene || idleFbx;
+        setupAvatar(idleScene);
+        currentSet = {
+          mixer: new THREE.AnimationMixer(avatarRoot),
+          idleClip: idleFbx.animations && idleFbx.animations.length > 0 ? idleFbx.animations[0] : null,
+          talkingClip: talkingFbx.animations && talkingFbx.animations.length > 0 ? talkingFbx.animations[0] : null,
+        };
+        console.log('[avatar] 当前剪辑绑定:', {
+          hasIdle: !!currentSet.idleClip,
+          hasTalking: !!currentSet.talkingClip,
+        });
+        if (!currentSet.talkingClip) {
+          currentSet.talkingClip = currentSet.idleClip;
+        }
+        currentSet.mixer.update(0);
+      });
+    }
+
+    function switchGuideType(type) {
+      if (!ANIMATION_SETS[type] || type === guideType) return;
+      console.log('[avatar] switchGuideType 请求:', { from: guideType, to: type, activeState });
+      guideType = type;
+      window.__avatarState__ = { guideType, activeState, pendingState };
+      try {
+        if (window.localStorage) {
+          window.localStorage.setItem('avatarGuideType', type);
+          console.log('[avatar] 已写入 localStorage.avatarGuideType =', type);
+        }
+      } catch (e) {
+        console.log('[avatar] 保存导游类型失败:', e);
+      }
+      pendingState = activeState;
+      stopCurrentActions();
+      if (avatarRoot) {
+        scene.remove(avatarRoot);
+        avatarRoot = null;
+      }
+      currentSet = null;
+      loadAvatarSet(type)
+        .then(() => {
+          playState(pendingState === 'talking' ? 'talking' : 'idle');
+          console.log('已切换数字人类型:', type);
+        })
+        .catch((err) => console.error('切换数字人动作失败:', err));
+    }
+
     function handleCommand(action) {
+      console.log('[avatar] handleCommand:', action, 'current=', { guideType, activeState, pendingState, hasCurrentSet: !!currentSet, hasMixer: !!(currentSet && currentSet.mixer) });
       if (action === 'startTalking') {
-        pendingState = 'talking';
-        setTalkingState(true);
+        window.__avatarTalkingLoopEnabled__ = true;
+        if (currentSet) {
+          currentSet.mixer.timeScale = 1;
+        }
+        playState('talking');
         console.log('切换为讲话状态');
+        setTimeout(() => {
+          console.log('[avatar] startTalking 后检查:', {
+            activeState,
+            pendingState,
+            mixerTime: currentSet && currentSet.mixer ? currentSet.mixer.time : null,
+            idleRunning: currentSet && currentSet.mixer && currentSet.idleClip ? currentSet.mixer.existingAction(currentSet.idleClip)?.isRunning?.() : null,
+            talkingRunning: currentSet && currentSet.mixer && currentSet.talkingClip ? currentSet.mixer.existingAction(currentSet.talkingClip)?.isRunning?.() : null,
+            idleWeight: currentSet && currentSet.mixer && currentSet.idleClip ? currentSet.mixer.existingAction(currentSet.idleClip)?.getEffectiveWeight?.() : null,
+            talkingWeight: currentSet && currentSet.mixer && currentSet.talkingClip ? currentSet.mixer.existingAction(currentSet.talkingClip)?.getEffectiveWeight?.() : null,
+          });
+        }, 100);
       } else if (action === 'stopTalking') {
-        pendingState = 'idle';
-        setTalkingState(false);
+        window.__avatarTalkingLoopEnabled__ = false;
+        playState('idle');
         console.log('切换为待机状态');
+        setTimeout(() => {
+          console.log('[avatar] stopTalking 后检查:', {
+            activeState,
+            pendingState,
+            mixerTime: currentSet && currentSet.mixer ? currentSet.mixer.time : null,
+          });
+        }, 100);
+      } else if (action === 'guideMouse') {
+        switchGuideType('mouse');
+      } else if (action === 'guideHuman') {
+        switchGuideType('human');
       }
     }
 
     window.avatarControl = {
       sendCommand(action) {
+        console.log('[avatar] sendCommand 收到:', action, 'current guideType=', guideType);
         handleCommand(action);
       }
     };
+    window.__avatarSendCommand__ = function(action) {
+      console.log('[avatar] __avatarSendCommand__ 收到:', action);
+      handleCommand(action);
+    };
+
+    window.addEventListener('load', () => {
+      console.log('[avatar] 页面 load 完成, 当前 guideType=', guideType);
+    });
 
     window.sendAvatarCommand = window.sendAvatarCommand || function(action) {
       handleCommand(action);
@@ -223,61 +401,49 @@
     window.__flushAvatarCommands__();
     window.__notifyFlutterReady__();
 
-    Promise.all([
-      loadClipFromFBX('/static/Idle.fbx'),
-      loadClipFromFBX('/static/Talking.fbx')
-    ]).then(([idleFbx, talkingFbx]) => {
-      if (idleFbx.animations && idleFbx.animations.length > 0) {
-        idleClip = idleFbx.animations[0];
-      }
-      if (talkingFbx.animations && talkingFbx.animations.length > 0) {
-        talkingClip = talkingFbx.animations[0];
-      }
-
-      const idleScene = idleFbx.scene || idleFbx;
-      setupAvatar(idleScene);
-
-      if (idleClip) {
-        idleAction = mixer.clipAction(idleClip);
-        idleAction.loop = THREE.LoopRepeat;
-        idleAction.clampWhenFinished = false;
-      }
-
-      if (talkingClip) {
-        talkingAction = mixer.clipAction(talkingClip);
-        talkingAction.loop = THREE.LoopRepeat;
-        talkingAction.clampWhenFinished = false;
-      }
-
-      if (idleAction) playAction(idleAction);
-
-      if (talkingAction) talkingAction.enabled = true;
-      if (idleAction) idleAction.enabled = true;
-
-      if (pendingState === 'talking' && talkingAction) {
-        setTalkingState(true);
-      } else {
-        setTalkingState(false);
-      }
-      console.log('数字人资源加载完成');
-      window.__notifyFlutterReady__();
-    }).catch((err) => {
-      console.error('FBX 加载失败:', err);
-    });
+    loadAvatarSet(guideType)
+      .then(() => {
+        playState('idle');
+        console.log('数字人资源加载完成');
+        window.__notifyFlutterReady__();
+      }).catch((err) => {
+        console.error('FBX 加载失败:', err);
+      });
 
     function animate() {
       requestAnimationFrame(animate);
 
       const delta = clock.getDelta();
       talkIntensity += ((activeState === 'talking' ? 1 : 0) - talkIntensity) * 0.08;
-      if (mixer) {
-        mixer.update(delta);
+      if (currentSet && currentSet.mixer) {
+        currentSet.mixer.update(delta);
       }
 
       if (avatarRoot && avatarRoot.morphTargetInfluences) {
         for (let i = 0; i < avatarRoot.morphTargetInfluences.length; i += 1) {
           avatarRoot.morphTargetInfluences[i] = clamp(talkIntensity, 0, 1);
         }
+      }
+
+      syncPendingActionFromStorage();
+      if (window.__avatarPendingAction__) {
+        const pending = window.__avatarPendingAction__;
+        window.__avatarPendingAction__ = null;
+        console.log('[avatar] 轮询到待处理动作:', pending, 'ageMs=', Date.now() - (window.__avatarPendingAt__ || Date.now()));
+        handleCommand(pending);
+      }
+      if (window.__avatarTalkingLoopEnabled__ && activeState !== 'talking' && currentSet && currentSet.mixer) {
+        console.log('[avatar] talking loop 重新拉起 talking');
+        playState('talking');
+      }
+
+      if (window.__avatarDebugTick__ && Math.random() < 0.02) {
+        console.log('[avatar] tick', {
+          state: activeState,
+          talkingIntensity: talkIntensity,
+          mixerTime: currentSet && currentSet.mixer ? currentSet.mixer.time : null,
+          talkingRunning: currentSet && currentSet.mixer && currentSet.talkingClip ? currentSet.mixer.existingAction(currentSet.talkingClip)?.isRunning?.() : null,
+        });
       }
 
       controls.update();

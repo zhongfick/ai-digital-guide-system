@@ -44,6 +44,7 @@ class SentimentReportPage extends StatelessWidget {
 
 class _DigitalGuidePageState extends State<DigitalGuidePage> {
   bool _isSpeaking = false;
+  int _speakToken = 0;
   static const String _backendBaseUrl = 'http://127.0.0.1:8000';
 
   // 对话相关
@@ -54,7 +55,9 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
   // 知识库管理
   bool _isUploadingKnowledge = false;
   bool _isLoadingKnowledgeFiles = false;
+  bool _isLoadingMetrics = false;
   List<Map<String, dynamic>> _knowledgeFiles = [];
+  Map<String, dynamic>? _dashboardMetrics;
 
   // 语音相关
   bool _isListening = false;
@@ -66,6 +69,8 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
   bool _avatarReady = false;
   final List<String> _pendingAvatarActions = [];
   _PortalSide _selectedSide = _PortalSide.visitor;
+  String _selectedGuideType = 'mouse';
+  int _avatarViewNonce = 0;
 
 
   // API地址
@@ -87,6 +92,7 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
     // 添加欢迎消息
     _messages.add({'role': 'ai', 'text': '您好！我是AI导游，请问有什么可以帮助您的？'});
 
+    _loadDashboardMetrics();
     _loadKnowledgeFiles();
 
     // Flutter Web 通过 postMessage 接收数字人就绪信号
@@ -103,8 +109,7 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
 
       // 监听语音开始和结束
       _flutterTts.setStartHandler(() {
-        setState(() => _isSpeaking = true);
-        _sendAvatarAction('startTalking');
+        _startAvatarTalking();
       });
 
       _flutterTts.setCompletionHandler(() {
@@ -225,34 +230,65 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
 
   // 向数字人发送动作指令
   Future<void> _sendAvatarAction(String action) async {
+    debugPrint('➡️ 准备发送数字人动作: $action, web=$kIsWeb, ready=$_avatarReady, controller=${_webController != null}');
+
+    final delivered = await _dispatchAvatarAction(action);
+    if (!delivered) {
+      _pendingAvatarActions.add(action);
+      debugPrint('⚠️ 数字人未就绪或控制器不可用，指令排队: $action');
+    }
+  }
+
+  Future<bool> _dispatchAvatarAction(String action) async {
+    final controller = _webController;
+    if (controller != null && _avatarReady) {
+      try {
+        await controller.evaluateJavascript(
+          source: "window.__setAvatarAction__ && window.__setAvatarAction__('$action');",
+        );
+        debugPrint('✅ 写入数字人待处理动作(WebView): $action');
+        return true;
+      } catch (e) {
+        debugPrint('❌ 写入数字人待处理动作(WebView)失败: $e');
+      }
+    }
+
     if (kIsWeb) {
       final sent = sendAvatarCommandToIframe(action);
-      if (!sent) {
-        _pendingAvatarActions.add(action);
-        debugPrint("⚠️ iframe未找到，指令排队: $action");
-        return;
-      }
-      debugPrint("✅ 发送数字人动作(Web): $action");
+      debugPrint('🌐 iframe发送结果: action=$action sent=$sent');
+      return sent;
+    }
+
+    return false;
+  }
+
+  String _avatarUrlForGuide(String guideType) {
+    final base = avatarFrameUrl;
+    final uri = Uri.parse(base);
+    return uri.replace(queryParameters: {
+      ...uri.queryParameters,
+      'guide': guideType,
+      'v': _avatarViewNonce.toString(),
+    }).toString();
+  }
+
+  Future<void> _reloadAvatarForGuide(String guideType) async {
+    final controller = _webController;
+    if (controller == null) {
+      debugPrint('⚠️ WebView 控制器不可用，无法重载数字人页面');
       return;
     }
 
-    if (_webController == null) {
-      _pendingAvatarActions.add(action);
-      debugPrint("⚠️ WebView未创建，指令排队: $action");
-      return;
-    }
-    if (!_avatarReady) {
-      _pendingAvatarActions.add(action);
-      debugPrint("⚠️ 数字人JS未就绪，指令排队: $action");
-      return;
-    }
+    _avatarViewNonce += 1;
+    final url = _avatarUrlForGuide(guideType);
+    debugPrint('🟣 重新加载数字人页面: $url');
+
     try {
-      await _webController!.evaluateJavascript(
-        source: "window.sendAvatarCommand('$action');",
-      );
-      debugPrint("✅ 发送数字人动作: $action");
+      _avatarReady = false;
+      await controller.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+      debugPrint('✅ 已触发数字人页面重载: $guideType');
     } catch (e) {
-      debugPrint("❌ 发送数字人动作失败: $e");
+      debugPrint('❌ 重载数字人页面失败: $e');
     }
   }
 
@@ -269,6 +305,7 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
     setState(() => _avatarReady = true);
     debugPrint("✅ 数字人JS桥接就绪");
     _flushPendingAvatarActions();
+    _sendAvatarAction(_selectedGuideType == 'mouse' ? 'guideMouse' : 'guideHuman');
   }
 
   Future<void> _waitForAvatarReady(InAppWebViewController controller) async {
@@ -297,8 +334,17 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
 
   void _onSpeechEnded() {
     if (!_isSpeaking) return;
+    debugPrint('🛑 语音结束，准备切回待机');
     setState(() => _isSpeaking = false);
     _sendAvatarAction('stopTalking');
+  }
+
+  Future<void> _startAvatarTalking() async {
+    _speakToken += 1;
+    final token = _speakToken;
+    setState(() => _isSpeaking = true);
+    debugPrint('🗣️ 数字人进入说话状态, token=$token');
+    await _sendAvatarAction('startTalking');
   }
 
   // 停止语音播报
@@ -323,17 +369,19 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
       if (_isSpeaking) {
         await _flutterTts.stop();
       }
-      await _sendAvatarAction('startTalking');
-      await _flutterTts.speak(text);
+      await _startAvatarTalking();
+      debugPrint('🗣️ 即将开始 TTS 播报，文本长度=${text.length}');
+      final result = await _flutterTts.speak(text);
+      debugPrint('🗣️ TTS speak 返回: $result');
     } catch (e) {
       debugPrint("❌ 语音播报失败: $e");
       await _sendAvatarAction('stopTalking');
     }
   }
 
-  void _syncAvatarTalkingState(String answer) {
+  Future<void> _syncAvatarTalkingState(String answer) async {
     if (answer.trim().isEmpty) return;
-    _sendAvatarAction('startTalking');
+    await _startAvatarTalking();
   }
 
   // 发送消息
@@ -367,8 +415,8 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
         });
 
         // 语音播报回答，同时让数字人保持谈话状态，直到播报结束再切回待机
-        _syncAvatarTalkingState(answer);
-        _speak(answer);
+        await _syncAvatarTalkingState(answer);
+        await _speak(answer);
       }
     } catch (e) {
       setState(() {
@@ -384,6 +432,26 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
     cancelSpeechInput();
     _flutterTts.stop();
     super.dispose();
+  }
+
+  Future<void> _loadDashboardMetrics() async {
+    setState(() => _isLoadingMetrics = true);
+    try {
+      final response = await http.get(Uri.parse('$_backendBaseUrl/dashboard/metrics'));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final metrics = data['data'] as Map<String, dynamic>?;
+        if (metrics != null && mounted) {
+          setState(() => _dashboardMetrics = metrics);
+        }
+      }
+    } catch (e) {
+      _showSnackBar('加载概览数据失败: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _isLoadingMetrics = false);
+      }
+    }
   }
 
   Future<void> _loadKnowledgeFiles() async {
@@ -706,14 +774,15 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
           const SizedBox(height: 18),
           LayoutBuilder(
             builder: (context, constraints) {
+              final metrics = _dashboardMetrics;
               return Wrap(
                 spacing: 12,
                 runSpacing: 12,
                 children: [
-                  _buildMetricCard('今日服务人次', '1,286', Icons.people_alt_rounded, constraints.maxWidth),
-                  _buildMetricCard('本周问答', '42', Icons.question_answer_rounded, constraints.maxWidth),
-                  _buildMetricCard('满意度趋势', '96.4%', Icons.sentiment_satisfied_alt_rounded, constraints.maxWidth),
-                  _buildMetricCard('新增知识文档', '18', Icons.note_add_rounded, constraints.maxWidth),
+                  _buildMetricCard('今日服务人次', metrics?['today_services']?.toString() ?? '0', Icons.people_alt_rounded, constraints.maxWidth),
+                  _buildMetricCard('本周问答', metrics?['weekly_questions']?.toString() ?? '0', Icons.question_answer_rounded, constraints.maxWidth),
+                  _buildMetricCard('满意度趋势', '${(metrics?['satisfaction_rate'] ?? 0).toString()}%', Icons.sentiment_satisfied_alt_rounded, constraints.maxWidth),
+                  _buildMetricCard('新增知识文档', metrics?['knowledge_docs']?.toString() ?? '0', Icons.note_add_rounded, constraints.maxWidth),
                 ],
               );
             },
@@ -846,11 +915,33 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
   }
 
   Widget _buildAvatarManagementPanel() {
-    return Wrap(
-      spacing: 12,
-      runSpacing: 12,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _buildInfoTile(Icons.checkroom_rounded, '外观配置', '设置数字人形象、发型、配色与风格'),
+        SegmentedButton<String>(
+          segments: const [
+            ButtonSegment(value: 'mouse', label: Text('小鼠导游'), icon: Icon(Icons.pets)),
+            ButtonSegment(value: 'human', label: Text('人类导游'), icon: Icon(Icons.person)),
+          ],
+          selected: {_selectedGuideType},
+          onSelectionChanged: (set) {
+            final value = set.first;
+            debugPrint('🟣 点击切换导游类型: $value, 当前=$_selectedGuideType');
+            setState(() => _selectedGuideType = value);
+            final action = value == 'mouse' ? 'guideMouse' : 'guideHuman';
+            debugPrint('🟣 即将调用 _sendAvatarAction($action)');
+            setState(() {
+              _avatarReady = false;
+              _avatarViewNonce += 1;
+            });
+            _reloadAvatarForGuide(value).then((_) {
+              _sendAvatarAction(action);
+            });
+          },
+          showSelectedIcon: false,
+        ),
+        const SizedBox(height: 16),
+        _buildInfoTile(Icons.checkroom_rounded, '动作配置', '小鼠使用 Idle/Talking，人类使用 humanidle/humantalking'),
       ],
     );
   }
@@ -906,9 +997,15 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
                   Row(
                     children: [
                       Expanded(
-                        child: Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+                        child: Text(
+                          title,
+                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
-                      Icon(Icons.chevron_right_rounded, color: Colors.grey.shade400),
+                      const SizedBox(width: 4),
+                      Icon(Icons.chevron_right_rounded, color: Colors.grey.shade400, size: 18),
                     ],
                   ),
                   const SizedBox(height: 4),
@@ -1111,20 +1208,28 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
                 transparentBackground: true,
                 isInspectable: kIsWeb,
               ),
-              initialUrlRequest: URLRequest(url: WebUri(avatarFrameUrl)),
+              key: ValueKey('avatar-webview-$_avatarViewNonce'),
+              initialUrlRequest: URLRequest(url: WebUri(_avatarUrlForGuide(_selectedGuideType))),
+              onLoadError: (controller, url, code, message) {
+                debugPrint('数字人资源加载失败: $message');
+              },
               onWebViewCreated: (controller) {
+                debugPrint('🟢 WebView 创建完成');
                 _webController = controller;
                 if (!kIsWeb) {
                   controller.addJavaScriptHandler(
                     handlerName: 'avatarReady',
                     callback: (args) {
+                      debugPrint('🟢 收到 avatarReady handler 回调');
                       _onAvatarReady();
                     },
                   );
+                } else {
+                  debugPrint('🌐 Web 平台跳过 addJavaScriptHandler，改用 iframe/postMessage');
                 }
               },
               onLoadStop: (controller, url) async {
-                print("✅ 数字人页面HTML加载完成");
+                debugPrint('✅ 数字人页面HTML加载完成: $url');
                 await _waitForAvatarReady(controller);
               },
               onConsoleMessage: (controller, msg) {
