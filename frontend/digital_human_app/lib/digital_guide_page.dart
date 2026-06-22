@@ -240,6 +240,12 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
   }
 
   Future<bool> _dispatchAvatarAction(String action) async {
+    if (kIsWeb) {
+      final sent = sendAvatarCommandToIframe(action);
+      debugPrint('🌐 iframe发送结果: action=$action sent=$sent');
+      return sent;
+    }
+
     final controller = _webController;
     if (controller != null && _avatarReady) {
       try {
@@ -251,12 +257,6 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
       } catch (e) {
         debugPrint('❌ 写入数字人待处理动作(WebView)失败: $e');
       }
-    }
-
-    if (kIsWeb) {
-      final sent = sendAvatarCommandToIframe(action);
-      debugPrint('🌐 iframe发送结果: action=$action sent=$sent');
-      return sent;
     }
 
     return false;

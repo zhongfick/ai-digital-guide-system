@@ -26,15 +26,10 @@ bool sendAvatarCommandToIframe(String action) {
     
     // 直接通过 postMessage 发送，不使用 localStorage
     try {
-      frame.contentWindow?.postMessage(payload, html.window.location.origin);
-      html.window.console.log('[flutter-bridge] postMessage success action=$action');
+      frame.contentWindow?.postMessage(payload, '*');
+      html.window.console.log('[flutter-bridge] postMessage success action=$action targetOrigin=*');
     } catch (e) {
-      html.window.console.log('[flutter-bridge] postMessage origin failed, retry *: $e');
-      try {
-        frame.contentWindow?.postMessage(payload, '*');
-      } catch (e2) {
-        html.window.console.log('[flutter-bridge] postMessage * also failed: $e2');
-      }
+      html.window.console.log('[flutter-bridge] postMessage failed action=$action error=$e');
     }
   }
 
