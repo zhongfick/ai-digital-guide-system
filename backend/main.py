@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -6,12 +6,15 @@ from pydantic import BaseModel
 from datetime import datetime
 import time
 from pathlib import Path
-from datetime import datetime
+import shutil
+import uuid
 
 
 # ===== 知识库管理 =====
-KNOWLEDGE_DIR = Path("knowledge_docs")
-KNOWLEDGE_DIR.mkdir(exist_ok=True)
+BASE_DIR = Path(__file__).resolve().parent
+KNOWLEDGE_DIR = BASE_DIR / "knowledge_docs"
+KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+ALLOWED_KNOWLEDGE_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt", ".md", ".xls", ".xlsx"}
 
 # 情感词典（简单版）
 POSITIVE_WORDS = ['好', '棒', '赞', '喜欢', '满意', '漂亮', '美', '开心', '感谢', '不错', '很好', '非常']
@@ -70,6 +73,57 @@ class FeedbackRequest(BaseModel):
     answer: str
     rating: int  # 1-5分
     feedback: str = ""
+
+
+def _is_allowed_knowledge_file(filename: str) -> bool:
+    return Path(filename).suffix.lower() in ALLOWED_KNOWLEDGE_EXTENSIONS
+
+
+@app.get("/knowledge/files")
+async def list_knowledge_files():
+    files = []
+    for file_path in sorted(KNOWLEDGE_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        if file_path.is_file():
+            files.append({
+                "name": file_path.name,
+                "size": file_path.stat().st_size,
+                "modified_at": datetime.fromtimestamp(file_path.stat().st_mtime).isoformat(),
+            })
+    return {"success": True, "data": files}
+
+
+@app.post("/knowledge/upload")
+async def upload_knowledge_file(file: UploadFile = File(...)):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+    if not _is_allowed_knowledge_file(file.filename):
+        raise HTTPException(status_code=400, detail="暂不支持该文件类型")
+
+    safe_name = Path(file.filename).name
+    target_path = KNOWLEDGE_DIR / f"{uuid.uuid4().hex}_{safe_name}"
+
+    try:
+        with target_path.open("wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    finally:
+        await file.close()
+
+    return {
+        "success": True,
+        "data": {
+            "name": target_path.name,
+            "original_name": safe_name,
+        },
+    }
+
+
+@app.delete("/knowledge/files/{filename}")
+async def delete_knowledge_file(filename: str):
+    target_path = KNOWLEDGE_DIR / Path(filename).name
+    if not target_path.exists() or not target_path.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    target_path.unlink()
+    return {"success": True}
 
 
 # AI对话接口

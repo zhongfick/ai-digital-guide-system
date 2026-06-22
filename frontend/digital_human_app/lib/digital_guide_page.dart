@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:file_picker/file_picker.dart';
 
 enum _PortalSide { visitor, admin }
 
@@ -19,11 +20,17 @@ class DigitalGuidePage extends StatefulWidget {
 
 class _DigitalGuidePageState extends State<DigitalGuidePage> {
   bool _isSpeaking = false;
+  static const String _backendBaseUrl = 'http://127.0.0.1:8000';
 
   // 对话相关
   final TextEditingController _textController = TextEditingController();
   final List<Map<String, String>> _messages = [];
   bool _isLoading = false;
+
+  // 知识库管理
+  bool _isUploadingKnowledge = false;
+  bool _isLoadingKnowledgeFiles = false;
+  List<Map<String, dynamic>> _knowledgeFiles = [];
 
   // 语音相关
   bool _isListening = false;
@@ -39,6 +46,8 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
 
   // API地址
   final String _apiUrl = "http://127.0.0.1:8000/chat";
+  final String _knowledgeListUrl = '$_backendBaseUrl/knowledge/files';
+  final String _knowledgeUploadUrl = '$_backendBaseUrl/knowledge/upload';
 
   @override
   void initState() {
@@ -53,6 +62,8 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
 
     // 添加欢迎消息
     _messages.add({'role': 'ai', 'text': '您好！我是AI导游，请问有什么可以帮助您的？'});
+
+    _loadKnowledgeFiles();
 
     // Flutter Web 通过 postMessage 接收数字人就绪信号
     setupAvatarMessageListener(_onAvatarReady);
@@ -351,6 +362,93 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
     super.dispose();
   }
 
+  Future<void> _loadKnowledgeFiles() async {
+    setState(() => _isLoadingKnowledgeFiles = true);
+    try {
+      final response = await http.get(Uri.parse(_knowledgeListUrl));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final files = (data['data'] as List<dynamic>? ?? [])
+            .cast<Map<String, dynamic>>();
+        setState(() => _knowledgeFiles = files);
+      }
+    } catch (e) {
+      _showSnackBar('加载知识库失败: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _isLoadingKnowledgeFiles = false);
+      }
+    }
+  }
+
+  Future<void> _pickAndUploadKnowledgeFile() async {
+    if (_isUploadingKnowledge) return;
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        allowMultiple: false,
+        withData: true,
+        withReadStream: true,
+      );
+      if (result == null || result.files.isEmpty) return;
+
+      final file = result.files.first;
+
+      setState(() => _isUploadingKnowledge = true);
+
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse(_knowledgeUploadUrl),
+      );
+
+      final bytes = file.bytes;
+      if (bytes != null) {
+        request.files.add(http.MultipartFile.fromBytes(
+          'file',
+          bytes,
+          filename: file.name,
+        ));
+      } else if (file.readStream != null) {
+        request.files.add(http.MultipartFile(
+          'file',
+          file.readStream!,
+          file.size,
+          filename: file.name,
+        ));
+      } else {
+        _showSnackBar('未读取到文件内容，请重新选择文件');
+        return;
+      }
+
+      final response = await request.send();
+      if (response.statusCode == 200) {
+        _showSnackBar('文档上传成功');
+        await _loadKnowledgeFiles();
+      } else {
+        _showSnackBar('上传失败：${response.statusCode}');
+      }
+    } catch (e) {
+      _showSnackBar('上传失败: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _isUploadingKnowledge = false);
+      }
+    }
+  }
+
+  Future<void> _deleteKnowledgeFile(String filename) async {
+    try {
+      final response = await http.delete(Uri.parse('$_backendBaseUrl/knowledge/files/$filename'));
+      if (response.statusCode == 200) {
+        _showSnackBar('删除成功');
+        await _loadKnowledgeFiles();
+      } else {
+        _showSnackBar('删除失败：${response.statusCode}');
+      }
+    } catch (e) {
+      _showSnackBar('删除失败: $e');
+    }
+  }
+
   void _showSnackBar(String message) {
     ScaffoldMessenger.of(
       context,
@@ -422,7 +520,7 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
         children: [
           _buildSectionHeader(
             title: '导游在此！',
-            subtitle: '欢迎各位游客',
+            subtitle: '欢迎各位游客,导游已接入DEEPSEEK大模型，准备为您提供全方位的景区讲解与智能问答服务！',
           ),
           Expanded(
             child: ClipRRect(
@@ -490,7 +588,13 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
                     title: '知识库管理',
                     subtitle: '上传、更新和维护景区讲解词、文史资料、常见问题及答案等知识文档。',
                     accent: const Color(0xFF5B8DEF),
-                    child: _buildKnowledgeLibraryPanel(),
+                    child: Column(
+                      children: [
+                        _buildKnowledgeLibraryPanel(),
+                        const SizedBox(height: 16),
+                        _buildInfoTile(Icons.folder_open_rounded, '说明', '点击“文档上传”导入文件，点击“内容维护”刷新并查看列表。'),
+                      ],
+                    ),
                   ),
                   const SizedBox(height: 16),
                   _buildAdminSectionCard(
@@ -660,14 +764,32 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
   }
 
   Widget _buildKnowledgeLibraryPanel() {
-    return Wrap(
-      spacing: 12,
-      runSpacing: 12,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _buildInfoTile(Icons.upload_file_rounded, '文档上传', '支持讲解词、文史资料、FAQ 批量导入'),
-        _buildInfoTile(Icons.edit_note_rounded, '内容维护', '支持版本更新、审核与发布回滚'),
-       
-        
+        Row(
+          children: [
+            Expanded(
+              child: _buildActionTile(
+                icon: Icons.upload_file_rounded,
+                title: '文档上传',
+                desc: '支持讲解词、文史资料、FAQ 批量导入',
+                onTap: _isUploadingKnowledge ? null : _pickAndUploadKnowledgeFile,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _buildActionTile(
+                icon: Icons.edit_note_rounded,
+                title: '内容维护',
+                desc: '查看已导入的文档并进行删除维护',
+                onTap: _loadKnowledgeFiles,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        _buildKnowledgeFileList(),
       ],
     );
   }
@@ -695,6 +817,123 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
   }
 
 
+
+  Widget _buildActionTile({
+    required IconData icon,
+    required String title,
+    required String desc,
+    required VoidCallback? onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF8FAFF),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: const Color(0xFFE6ECFF)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xFF667EEA).withOpacity(0.12),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(icon, color: const Color(0xFF667EEA), size: 20),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+                      ),
+                      Icon(Icons.chevron_right_rounded, color: Colors.grey.shade400),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(desc, style: TextStyle(fontSize: 12, color: Colors.grey.shade600, height: 1.35)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildKnowledgeFileList() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              const Text('已导入文档', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+              const Spacer(),
+              if (_isLoadingKnowledgeFiles)
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (_knowledgeFiles.isEmpty)
+            Text('暂无已导入文档', style: TextStyle(color: Colors.grey.shade600))
+          else
+            ..._knowledgeFiles.map((file) {
+              final name = file['name']?.toString() ?? '';
+              final originalName = name.contains('_') ? name.split('_').skip(1).join('_') : name;
+              return Container(
+                margin: const EdgeInsets.only(bottom: 10),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF8FAFF),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: const Color(0xFFE6ECFF)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.description_rounded, color: Color(0xFF667EEA)),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(originalName, style: const TextStyle(fontWeight: FontWeight.w600)),
+                          const SizedBox(height: 4),
+                          Text(name, style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+                        ],
+                      ),
+                    ),
+                    TextButton.icon(
+                      onPressed: () => _deleteKnowledgeFile(name),
+                      icon: const Icon(Icons.delete_outline, size: 18),
+                      label: const Text('删除'),
+                    ),
+                  ],
+                ),
+              );
+            }),
+        ],
+      ),
+    );
+  }
 
   Widget _buildInfoTile(IconData icon, String title, String desc) {
     return Container(
