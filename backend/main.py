@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 import shutil
 import uuid
+import json
+import asyncio
 
 
 # ===== 知识库管理 =====
@@ -15,6 +17,7 @@ BASE_DIR = Path(__file__).resolve().parent
 KNOWLEDGE_DIR = BASE_DIR / "knowledge_docs"
 KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_KNOWLEDGE_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt", ".md", ".xls", ".xlsx"}
+HISTORY_LOG_PATH = BASE_DIR / "interaction_logs.jsonl"
 
 # 情感词典（简单版）
 POSITIVE_WORDS = ['好', '棒', '赞', '喜欢', '满意', '漂亮', '美', '开心', '感谢', '不错', '很好', '非常']
@@ -75,8 +78,33 @@ class FeedbackRequest(BaseModel):
     feedback: str = ""
 
 
+class ReportRequest(BaseModel):
+    limit: int = 30
+
+
 def _is_allowed_knowledge_file(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_KNOWLEDGE_EXTENSIONS
+
+
+def _append_history_record(record: dict) -> None:
+    with HISTORY_LOG_PATH.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _load_history_records() -> list[dict]:
+    if not HISTORY_LOG_PATH.exists():
+        return []
+    records = []
+    with HISTORY_LOG_PATH.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except Exception:
+                continue
+    return records
 
 
 @app.get("/knowledge/files")
@@ -132,21 +160,23 @@ async def chat_with_ai(request: ChatRequest):
     """AI导游对话接口"""
     try:
         start_time = time.time()
-        
         if not guide_system:
-            raise HTTPException(
-                status_code=503, 
-                detail="AI系统未初始化，请检查后端日志"
-            )
+            raise HTTPException(status_code=503, detail="AI系统未初始化，请检查后端日志")
 
-        
-        # 生成回答
         answer = await guide_system.generate_response(request.question)
-        
         response_time = time.time() - start_time
-        
 
-        
+        record = {
+            "user_id": request.user_id,
+            "session_id": request.session_id,
+            "question": request.question,
+            "answer": answer,
+            "response_time": round(response_time, 3),
+            "timestamp": datetime.now().isoformat(),
+            "sentiment": "unknown",
+        }
+        _append_history_record(record)
+
         return {
             "success": True,
             "data": {
@@ -158,9 +188,46 @@ async def chat_with_ai(request: ChatRequest):
             "session_id": request.session_id,
             "timestamp": datetime.now().isoformat()
         }
-        
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/reports/sentiment")
+async def generate_sentiment_report(request: ReportRequest):
+    records = _load_history_records()[-request.limit:]
+    if not records:
+        raise HTTPException(status_code=404, detail="暂无历史问答记录")
+
+    if not guide_system or not getattr(guide_system, "llm", None):
+        raise HTTPException(status_code=503, detail="DeepSeek 未初始化")
+
+    history_text = "\n".join(
+        f"{idx+1}. 用户: {item.get('question','')}\n   AI: {item.get('answer','')}"
+        for idx, item in enumerate(records)
+    )
+    prompt = f"""你是景区游客感受度分析师。请根据以下历史问答记录，直接生成一份简洁、专业、可读性强的游客感受度报告。
+
+要求：
+1. 整合关注点分析、情感趋势报告、服务建议三部分内容
+2. 直接输出报告正文，不要解释分析过程
+3. 用中文，语气专业、清晰，适合管理后台展示
+4. 给出 3-5 条可执行建议
+5. 不要提及“我无法”或“模型限制”
+
+历史问答记录：
+{history_text}
+"""
+
+    try:
+        if hasattr(guide_system.llm, "ainvoke"):
+            response = await guide_system.llm.ainvoke(prompt)
+            report = getattr(response, "content", str(response))
+        else:
+            response = await asyncio.to_thread(guide_system.llm.invoke, prompt)
+            report = getattr(response, "content", str(response)) if hasattr(response, "content") else str(response)
+        return {"success": True, "data": {"report": report, "records_count": len(records)}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

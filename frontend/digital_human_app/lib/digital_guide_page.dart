@@ -18,6 +18,30 @@ class DigitalGuidePage extends StatefulWidget {
   State<DigitalGuidePage> createState() => _DigitalGuidePageState();
 }
 
+class SentimentReportPage extends StatelessWidget {
+  final String report;
+  const SentimentReportPage({super.key, required this.report});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('游客感受度报告')),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Text(report, style: const TextStyle(fontSize: 15, height: 1.6)),
+        ),
+      ),
+    );
+  }
+}
+
 class _DigitalGuidePageState extends State<DigitalGuidePage> {
   bool _isSpeaking = false;
   static const String _backendBaseUrl = 'http://127.0.0.1:8000';
@@ -449,6 +473,33 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
     }
   }
 
+  Future<void> _generateSentimentReport() async {
+    try {
+      setState(() => _isLoading = true);
+      final response = await http.post(
+        Uri.parse('$_backendBaseUrl/reports/sentiment'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'limit': 30}),
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final report = data['data']?['report']?.toString() ?? '暂无报告内容';
+        if (!mounted) return;
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => SentimentReportPage(report: report),
+          ),
+        );
+      } else {
+        _showSnackBar('生成失败：${response.statusCode}');
+      }
+    } catch (e) {
+      _showSnackBar('生成失败: $e');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
   void _showSnackBar(String message) {
     ScaffoldMessenger.of(
       context,
@@ -608,9 +659,9 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
                   _buildAdminSectionCard(
                     icon: Icons.analytics_rounded,
                     title: '游客感受度报告',
-                    subtitle: '分析交互记录，生成游客关注点、情感趋势与服务建议反馈。',
+                    subtitle: '基于历史问答记录，实时生成综合感受度分析报告。',
                     accent: const Color(0xFF18A999),
-                    child: _buildVisitorReportPanel(),
+                    child: _buildSentimentReportPanel(),
                   ),
 
                 ],
@@ -804,14 +855,16 @@ class _DigitalGuidePageState extends State<DigitalGuidePage> {
     );
   }
 
-  Widget _buildVisitorReportPanel() {
+  Widget _buildSentimentReportPanel() {
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _buildInfoTile(Icons.insights_rounded, '关注点分析', '统计游客最常询问的景点、路线与服务问题'),
-        const SizedBox(height: 12),
-        _buildInfoTile(Icons.auto_graph_rounded, '情感趋势报告', '分析咨询过程中的情绪变化与满意度波动'),
-        const SizedBox(height: 12),
-        _buildInfoTile(Icons.feedback_rounded, '服务建议', '输出高频投诉点、优化建议与改进优先级'),
+        _buildActionTile(
+          icon: Icons.analytics_rounded,
+          title: '生成感受度报告',
+          desc: '基于历史问答记录生成综合报告',
+          onTap: _generateSentimentReport,
+        ),
       ],
     );
   }
