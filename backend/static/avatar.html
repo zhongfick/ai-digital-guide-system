@@ -140,11 +140,13 @@
     let avatarRoot = null;
     let activeState = 'idle';
     let pendingState = 'idle';
+    let desiredState = 'idle';
     let currentAction = null;
     let talkIntensity = 0;
     const urlGuideType = new URLSearchParams(window.location.search).get('guide');
     let guideType = urlGuideType || (window.localStorage && window.localStorage.getItem('avatarGuideType')) || 'mouse';
     let currentSet = null;
+    let avatarLoadToken = 0;
     console.log('[avatar] 初始化导游类型:', guideType, 'urlGuideType=', urlGuideType, 'localStorage=', window.localStorage ? window.localStorage.getItem('avatarGuideType') : null, 'location=', window.location.href);
     const ANIMATION_SETS = {
       mouse: {
@@ -237,6 +239,40 @@
         currentSet.mixer.stopAllAction();
         currentSet.mixer.update(0);
       }
+      talkIntensity = 0;
+    }
+
+    function forceExclusiveAction(state) {
+      if (!currentSet || !currentSet.mixer) return null;
+
+      const mixer = currentSet.mixer;
+      const idleClip = currentSet.idleClip;
+      const talkingClip = currentSet.talkingClip;
+      const targetClip = state === 'talking' ? talkingClip : idleClip;
+      const idleAction = idleClip ? mixer.existingAction(idleClip) : null;
+      const talkingAction = talkingClip ? mixer.existingAction(talkingClip) : null;
+
+      console.log('[avatar] forceExclusiveAction:', state, {
+        idleActionExists: !!idleAction,
+        talkingActionExists: !!talkingAction,
+        targetClip: targetClip ? targetClip.name : null,
+      });
+
+      mixer.stopAllAction();
+      if (idleClip) mixer.uncacheClip(idleClip);
+      if (talkingClip && talkingClip !== idleClip) mixer.uncacheClip(talkingClip);
+
+      if (!targetClip) return null;
+      const action = mixer.clipAction(targetClip);
+      action.reset();
+      action.enabled = true;
+      action.paused = false;
+      action.clampWhenFinished = false;
+      action.setLoop(THREE.LoopRepeat, Infinity);
+      action.setEffectiveWeight(1);
+      action.setEffectiveTimeScale(1);
+      action.play();
+      return action;
     }
 
     function getClipAction(set, state) {
@@ -268,7 +304,8 @@
 
     function applyState(state) {
       if (!currentSet) return;
-      const nextAction = getClipAction(currentSet, state);
+      desiredState = state;
+      const nextAction = forceExclusiveAction(state);
       if (!nextAction) {
         console.log('[avatar] applyState 未找到动画:', state);
         return;
@@ -277,48 +314,13 @@
       const idleAction = currentSet.idleClip ? currentSet.mixer.existingAction(currentSet.idleClip) : null;
       const talkingAction = currentSet.talkingClip ? currentSet.mixer.existingAction(currentSet.talkingClip) : null;
 
-      console.log('[avatar] applyState 切换前状态:', {
-        state,
-        idleExists: !!idleAction,
-        talkingExists: !!talkingAction,
-        currentActionIsIdle: currentAction === idleAction,
-        currentActionIsTalking: currentAction === talkingAction,
-      });
-
-      currentSet.mixer.stopAllAction();
-      if (state === 'talking') {
-        if (idleAction) {
-          try { idleAction.stop(); } catch (e) {}
-          try { currentSet.mixer.uncacheClip(currentSet.idleClip); } catch (e) {}
-          console.log('[avatar] applyState 强制清理 idle 动作');
-        }
-      } else {
-        if (talkingAction) {
-          try { talkingAction.stop(); } catch (e) {}
-          try { currentSet.mixer.uncacheClip(currentSet.talkingClip); } catch (e) {}
-          console.log('[avatar] applyState 强制清理 talking 动作');
-        }
-      }
-
-      if (currentAction && currentAction !== nextAction) {
-        try { currentAction.stop(); } catch (e) {}
-      }
-
-      nextAction.reset();
-      nextAction.enabled = true;
-      nextAction.paused = false;
-      nextAction.setEffectiveWeight(1);
-      nextAction.setEffectiveTimeScale(1);
-      nextAction.clampWhenFinished = false;
-      nextAction.play();
-      currentAction = nextAction;
       activeState = state;
       pendingState = state;
       window.__avatarGuideType__ = guideType;
       window.__avatarActiveState__ = activeState;
       window.__avatarPendingState__ = pendingState;
       window.__avatarState__ = { guideType, activeState, pendingState };
-      console.log('[avatar] applyState 启动动画:', state, nextAction.getClip ? nextAction.getClip().name : 'unknown', {
+      console.log('[avatar] applyState 互斥播放完成:', state, nextAction.getClip ? nextAction.getClip().name : 'unknown', {
         mixerTime: currentSet && currentSet.mixer ? currentSet.mixer.time : null,
         actionTime: nextAction.time,
         weight: nextAction.getEffectiveWeight ? nextAction.getEffectiveWeight() : null,
@@ -338,12 +340,17 @@
     }
 
     function loadAvatarSet(type) {
+      const token = ++avatarLoadToken;
       const set = ANIMATION_SETS[type];
-      console.log('[avatar] 开始加载角色套装:', type, set, 'guideType=', guideType);
+      console.log('[avatar] 开始加载角色套装:', type, set, 'guideType=', guideType, 'token=', token);
       return Promise.all([
         loadClipFromFBX(set.idle),
         loadClipFromFBX(set.talking)
       ]).then(([idleFbx, talkingFbx]) => {
+        if (token !== avatarLoadToken) {
+          console.log('[avatar] 丢弃过期加载结果 token=', token, 'current=', avatarLoadToken);
+          return;
+        }
         console.log('[avatar] 资源加载完成:', {
           type,
           idleAnimations: idleFbx.animations ? idleFbx.animations.length : 0,
@@ -365,14 +372,11 @@
           currentSet.talkingClip = currentSet.idleClip;
         }
         if (currentSet.idleClip) {
-          const idleAction = currentSet.mixer.clipAction(currentSet.idleClip);
-          idleAction.reset();
-          idleAction.setLoop(THREE.LoopRepeat, Infinity);
-          idleAction.setEffectiveWeight(1);
-          idleAction.play();
-          currentAction = idleAction;
-          activeState = 'idle';
-          pendingState = 'idle';
+          const initialState = desiredState === 'talking' ? 'talking' : 'idle';
+          const initialAction = forceExclusiveAction(initialState);
+          currentAction = initialAction;
+          activeState = initialState;
+          pendingState = initialState;
           window.__avatarGuideType__ = guideType;
           window.__avatarActiveState__ = activeState;
           window.__avatarPendingState__ = pendingState;
@@ -383,7 +387,7 @@
 
     function switchGuideType(type) {
       if (!ANIMATION_SETS[type]) return;
-      console.log('[avatar] switchGuideType 请求:', { from: guideType, to: type, activeState });
+      console.log('[avatar] switchGuideType 请求:', { from: guideType, to: type, activeState, desiredState });
       guideType = type;
       window.__avatarState__ = { guideType, activeState, pendingState };
       try {
@@ -394,7 +398,7 @@
       } catch (e) {
         console.log('[avatar] 保存导游类型失败:', e);
       }
-      pendingState = activeState;
+      pendingState = desiredState;
       stopCurrentActions();
       if (avatarRoot) {
         scene.remove(avatarRoot);
@@ -404,43 +408,22 @@
       currentAction = null;
       loadAvatarSet(type)
         .then(() => {
-          playState(pendingState === 'talking' ? 'talking' : 'idle');
+          playState(desiredState === 'talking' ? 'talking' : 'idle');
           console.log('已切换数字人类型:', type);
         })
         .catch((err) => console.error('切换数字人动作失败:', err));
     }
 
     function handleCommand(action) {
-      console.log('[avatar] handleCommand:', action, 'current=', { guideType, activeState, pendingState, hasCurrentSet: !!currentSet, hasMixer: !!(currentSet && currentSet.mixer) });
+      console.log('[avatar] handleCommand:', action, 'current=', { guideType, activeState, pendingState, desiredState, hasCurrentSet: !!currentSet, hasMixer: !!(currentSet && currentSet.mixer) });
       if (action === 'startTalking') {
         window.__avatarTalkingLoopEnabled__ = true;
-        if (currentSet) {
-          currentSet.mixer.timeScale = 1;
-        }
         applyState('talking');
         console.log('切换为讲话状态');
-        setTimeout(() => {
-          console.log('[avatar] startTalking 后检查:', {
-            activeState: window.__avatarActiveState__ || activeState,
-            pendingState: window.__avatarPendingState__ || pendingState,
-            mixerTime: currentSet && currentSet.mixer ? currentSet.mixer.time : null,
-            idleRunning: currentSet && currentSet.mixer && currentSet.idleClip ? currentSet.mixer.existingAction(currentSet.idleClip)?.isRunning?.() : null,
-            talkingRunning: currentSet && currentSet.mixer && currentSet.talkingClip ? currentSet.mixer.existingAction(currentSet.talkingClip)?.isRunning?.() : null,
-            idleWeight: currentSet && currentSet.mixer && currentSet.idleClip ? currentSet.mixer.existingAction(currentSet.idleClip)?.getEffectiveWeight?.() : null,
-            talkingWeight: currentSet && currentSet.mixer && currentSet.talkingClip ? currentSet.mixer.existingAction(currentSet.talkingClip)?.getEffectiveWeight?.() : null,
-          });
-        }, 100);
       } else if (action === 'stopTalking') {
         window.__avatarTalkingLoopEnabled__ = false;
         applyState('idle');
         console.log('切换为待机状态');
-        setTimeout(() => {
-          console.log('[avatar] stopTalking 后检查:', {
-            activeState,
-            pendingState,
-            mixerTime: currentSet && currentSet.mixer ? currentSet.mixer.time : null,
-          });
-        }, 100);
       } else if (action === 'guideMouse') {
         switchGuideType('mouse');
       } else if (action === 'guideHuman') {
@@ -504,10 +487,11 @@
         console.log('[avatar] 轮询到待处理动作:', pending, 'ageMs=', Date.now() - (window.__avatarPendingAt__ || Date.now()));
         handleCommand(pending);
       }
-      const effectiveState = window.__avatarActiveState__ || activeState;
-      if (window.__avatarTalkingLoopEnabled__ && effectiveState !== 'talking' && currentSet && currentSet.mixer) {
-        console.log('[avatar] talking loop 重新拉起 talking');
+      const effectiveState = activeState;
+      if (desiredState === 'talking' && effectiveState !== 'talking' && currentSet && currentSet.mixer) {
         applyState('talking');
+      } else if (desiredState === 'idle' && effectiveState !== 'idle' && currentSet && currentSet.mixer) {
+        applyState('idle');
       }
 
       if (window.__avatarDebugTick__ && Math.random() < 0.02) {
